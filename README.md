@@ -1,6 +1,6 @@
 # Swig
 
-> Job queues as intuitive as taking a swig 🍺
+> Job queues as refreshing as taking a swig 🍺
 
 Swig is a robust, PostgreSQL-backed job queue system for Go applications, designed for developers who need reliable background job processing with minimal setup.
 
