@@ -1,0 +1,19 @@
+name: autofix.ci
+on: workflow_dispatch
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./swig-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.1"
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+      - name: Run goimports
+        run: goimports -w .
+      - uses: autofix-ci/action@551dded8c6cc8a1054039c8bc0b8b48c51dfc6ef
