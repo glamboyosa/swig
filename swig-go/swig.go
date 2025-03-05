@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"swig/drivers"
+	"time"
 )
 
 type QueueTypes string
@@ -24,6 +27,18 @@ type Swig struct {
 	driver          drivers.Driver
 }
 
+// NewSwig creates a new job queue instance with the specified database driver
+// and queue configurations. Each queue config defines a queue type (Default/Priority)
+// and its worker pool size.
+//
+// Example:
+//
+//	driver := postgres.NewDriver(...)
+//	configs := []SwigQueueConfig{
+//	    {QueueType: Default, MaxWorkers: 5},
+//	    {QueueType: Priority, MaxWorkers: 3},
+//	}
+//	swig := NewSwig(driver, configs)
 func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig) *Swig {
 	return &Swig{
 		driver:          driver,
@@ -31,6 +46,7 @@ func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig) *Swig {
 	}
 }
 
+// Start initializes the Swig queue and creates the necessary tables
 func (s *Swig) Start(ctx context.Context) {
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS swig_jobs (
@@ -95,4 +111,60 @@ func (s *Swig) Stop(ctx context.Context) error {
 	// }
 
 	return nil
+}
+
+// JobOptions allows configuring job-specific settings
+type JobOptions struct {
+	Queue    QueueTypes
+	Priority int
+	RunAt    time.Time
+}
+
+// DefaultJobOptions provides default settings
+func DefaultJobOptions() JobOptions {
+	return JobOptions{
+		Queue:    Default,
+		Priority: 1,
+		RunAt:    time.Now(),
+	}
+}
+
+// AddJob is now a regular method that takes an interface{}
+func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOptions) error {
+	// Type assert to check if it implements Worker interface
+	if _, ok := worker.(interface{ JobName() string }); !ok {
+		return fmt.Errorf("worker must implement JobName() string")
+	}
+	// Use default options if none provided
+	jobOpts := DefaultJobOptions()
+	if len(opts) > 0 {
+		jobOpts = opts[0]
+	}
+
+	// Serialize the worker (which contains the args)
+	argsJSON, err := json.Marshal(worker)
+	if err != nil {
+		return fmt.Errorf("failed to serialize job args: %w", err)
+	}
+
+	insertSQL := `
+		INSERT INTO swig_jobs (
+			kind,
+			queue,
+			payload,
+			priority,
+			scheduled_for,
+			status
+		) VALUES ($1, $2, $3, $4, $5, 'pending')
+	`
+
+	return s.driver.Exec(
+		ctx,
+		insertSQL,
+		worker.(interface{ JobName() string }).JobName(),
+		string(jobOpts.Queue),
+		argsJSON,
+		jobOpts.Priority,
+		jobOpts.RunAt,
+	)
 }
