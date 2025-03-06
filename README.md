@@ -51,6 +51,30 @@ Swig supports two PostgreSQL driver implementations:
 - `pgx` - Using the high-performance [pgx](https://github.com/jackc/pgx) driver
 - `sql` - Using Go's standard `database/sql` interface
 
+## Understanding Workers
+
+Workers in Swig are structs that implement two key requirements:
+1. The `JobName() string` method to identify the worker type
+2. The `Process(context.Context) error` method to execute the job
+3. Have JSON-serializable fields for job arguments
+
+Example worker:
+```go
+type EmailWorker struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+    Body    string `json:"body"`
+}
+
+func (w *EmailWorker) JobName() string {
+    return "send_email"
+}
+
+func (w *EmailWorker) Process(ctx context.Context) error {
+    return sendEmail(w.To, w.Subject, w.Body)
+}
+```
+
 ## Quick Start
 
 ```go
@@ -65,7 +89,7 @@ import (
     "github.com/swig/swig-go/drivers"
 )
 
-// 1. Define your worker
+// 1. Define your worker (as shown above in Understanding Workers)
 type EmailWorker struct {
     To      string `json:"to"`
     Subject string `json:"subject"`
@@ -74,6 +98,10 @@ type EmailWorker struct {
 
 func (w *EmailWorker) JobName() string {
     return "send_email"
+}
+
+func (w *EmailWorker) Process(ctx context.Context) error {
+    return sendEmail(w.To, w.Subject, w.Body)
 }
 
 func main() {
@@ -90,13 +118,17 @@ func main() {
     // db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
     // driver, _ := drivers.NewSQLDriver(db)
     
+    // Create a worker registry and register your workers
+    registry := swig.NewWorkerRegistry()
+    registry.Register(&EmailWorker{})
+    
     // Configure queues (default setup)
     configs := []swig.SwigQueueConfig{
         {QueueType: swig.Default, MaxWorkers: 5},
     }
     
-    // Create and start Swig
-    swigClient := swig.NewSwig(driver, configs)
+    // Create and start Swig with the worker registry
+    swigClient := swig.NewSwig(driver, configs, registry)
     swigClient.Start(ctx)
     
     // Add a job (uses default queue)
@@ -151,25 +183,6 @@ Each queue operates independently with its own worker pool, allowing you to:
 - Prevent low-priority jobs from blocking important tasks
 - Scale worker pools based on queue requirements
 
-## Understanding Workers
-
-Workers in Swig are structs that:
-1. Implement the `JobName() string` method
-2. Have JSON-serializable fields for job arguments
-
-Example worker:
-```go
-type ImageResizeWorker struct {
-    ImageURL string `json:"image_url"`
-    Width    int    `json:"width"`
-    Height   int    `json:"height"`
-}
-
-func (w *ImageResizeWorker) JobName() string {
-    return "resize_image"
-}
-```
-
 ## Job Processing
 
 Swig handles job processing with:
@@ -194,4 +207,25 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details. 
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Worker Registration
+
+Workers must be registered with Swig before they can process jobs. This is done through the worker registry:
+
+```go
+// Create a registry
+registry := swig.NewWorkerRegistry()
+
+// Register workers
+registry.Register(&EmailWorker{})
+registry.Register(&ImageResizeWorker{})
+
+// Pass registry to Swig
+swigClient := swig.NewSwig(driver, configs, registry)
+```
+
+The registry ensures that:
+- Only registered worker types can be processed
+- Worker implementations are validated at startup
+- Job payloads can be properly deserialized 

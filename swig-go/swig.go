@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"swig/drivers"
+	"swig/workers"
 	"time"
 )
 
@@ -25,24 +26,32 @@ type SwigQueueConfig struct {
 type Swig struct {
 	swigQueueConfig []SwigQueueConfig
 	driver          drivers.Driver
+	Workers         workers.WorkerRegistry
 }
 
-// NewSwig creates a new job queue instance with the specified database driver
-// and queue configurations. Each queue config defines a queue type (Default/Priority)
-// and its worker pool size.
+// NewSwig creates a new job queue instance with the specified database driver,
+// queue configurations, and worker registry. Each queue config defines a queue type (Default/Priority)
+// and its worker pool size. The worker registry must contain all worker types that will be processed.
 //
 // Example:
 //
 //	driver := postgres.NewDriver(...)
+//
+//	// Register your workers
+//	workers := NewWorkerRegistry()
+//	workers.Register(&EmailWorker{})
+//
+//	// Configure queues
 //	configs := []SwigQueueConfig{
 //	    {QueueType: Default, MaxWorkers: 5},
-//	    {QueueType: Priority, MaxWorkers: 3},
 //	}
-//	swig := NewSwig(driver, configs)
-func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig) *Swig {
+//
+//	swig := NewSwig(driver, configs, workers)
+func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers workers.WorkerRegistry) *Swig {
 	return &Swig{
 		driver:          driver,
 		swigQueueConfig: swigQueueConfig,
+		Workers:         workers,
 	}
 }
 

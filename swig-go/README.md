@@ -12,6 +12,7 @@ go get github.com/swig/swig-go@v0.0.1-alpha
 - [Installation & Getting Started](../README.md#installation)
 - [Queue Configuration](../README.md#queue-configuration)
 - [Understanding Workers](../README.md#understanding-workers)
+- [Worker Registration](../README.md#worker-registration)
 - [Architecture](../README.md#architecture)
 - [Contributing Guide](../CONTRIBUTING.md)
 - [License](../LICENSE)
@@ -24,6 +25,7 @@ go get github.com/swig/swig-go@v0.0.1-alpha
 - **Multiple Queue Support**: Priority and default queues out of the box
 - **Type-Safe Job Arguments**: Strongly typed job arguments with Go generics
 - **Simple API**: Intuitive API for enqueueing and processing jobs
+- **Worker Registry**: Type-safe worker registration and validation
 
 ## Installation
 
@@ -51,15 +53,21 @@ import (
     "github.com/swig/swig-go/drivers"
 )
 
-// 1. Define your worker
+// Define a worker
 type EmailWorker struct {
     To      string `json:"to"`
     Subject string `json:"subject"`
     Body    string `json:"body"`
 }
 
+// Required: Unique name for this worker type
 func (w *EmailWorker) JobName() string {
     return "send_email"
+}
+
+// Required: Implementation of the job processing logic
+func (w *EmailWorker) Process(ctx context.Context) error {
+    return sendEmail(w.To, w.Subject, w.Body)
 }
 
 func main() {
@@ -76,13 +84,17 @@ func main() {
     // db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
     // driver, _ := drivers.NewSQLDriver(db)
     
+    // Create and configure worker registry
+    registry := swig.NewWorkerRegistry()
+    registry.Register(&EmailWorker{})
+    
     // Configure queues (default setup)
     configs := []swig.SwigQueueConfig{
         {QueueType: swig.Default, MaxWorkers: 5},
     }
     
-    // Create and start Swig
-    swigClient := swig.NewSwig(driver, configs)
+    // Create and start Swig with registry
+    swigClient := swig.NewSwig(driver, configs, registry)
     swigClient.Start(ctx)
     
     // Add a job (uses default queue)
