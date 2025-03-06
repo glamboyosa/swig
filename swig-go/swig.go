@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"swig/drivers"
+	"swig/workers"
 	"time"
 )
 
@@ -25,24 +26,32 @@ type SwigQueueConfig struct {
 type Swig struct {
 	swigQueueConfig []SwigQueueConfig
 	driver          drivers.Driver
+	Workers         workers.WorkerRegistry
 }
 
-// NewSwig creates a new job queue instance with the specified database driver
-// and queue configurations. Each queue config defines a queue type (Default/Priority)
-// and its worker pool size.
+// NewSwig creates a new job queue instance with the specified database driver,
+// queue configurations, and worker registry. Each queue config defines a queue type (Default/Priority)
+// and its worker pool size. The worker registry must contain all worker types that will be processed.
 //
 // Example:
 //
 //	driver := postgres.NewDriver(...)
+//
+//	// Register your workers
+//	workers := NewWorkerRegistry()
+//	workers.Register(&EmailWorker{})
+//
+//	// Configure queues
 //	configs := []SwigQueueConfig{
 //	    {QueueType: Default, MaxWorkers: 5},
-//	    {QueueType: Priority, MaxWorkers: 3},
 //	}
-//	swig := NewSwig(driver, configs)
-func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig) *Swig {
+//
+//	swig := NewSwig(driver, configs, workers)
+func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers workers.WorkerRegistry) *Swig {
 	return &Swig{
 		driver:          driver,
 		swigQueueConfig: swigQueueConfig,
+		Workers:         workers,
 	}
 }
 
@@ -129,11 +138,28 @@ func DefaultJobOptions() JobOptions {
 	}
 }
 
-// AddJob is now a regular method that takes an interface{}
-func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOptions) error {
+// AddJob enqueues a new job for processing. The workerWithArgs must be a struct that:
+//  1. Implements JobName() string to identify the worker type
+//  2. Implements Process(context.Context) error for job execution
+//  3. Contains JSON-serializable fields that will be passed to Process
+//
+// Job options can be provided to configure queue, priority, and scheduling.
+// If no options are provided, the job will be added to the default queue with normal priority
+// and immediate execution.
+//
+// Example:
+//
+//	err := swig.AddJob(ctx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	}, swig.JobOptions{
+//	    Queue: swig.Priority,
+//	    RunAt: time.Now().Add(time.Hour),
+//	})
+func (s *Swig) AddJob(ctx context.Context, workerWithArgs interface{}, opts ...JobOptions) error {
 	// Type assert to check if it implements Worker interface
-	if _, ok := worker.(interface{ JobName() string }); !ok {
-		return fmt.Errorf("worker must implement JobName() string")
+	if _, ok := workerWithArgs.(interface{ JobName() string }); !ok {
+		return fmt.Errorf("workerWithArgs must implement JobName() string")
 	}
 	// Use default options if none provided
 	jobOpts := DefaultJobOptions()
@@ -142,7 +168,7 @@ func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOption
 	}
 
 	// Serialize the worker (which contains the args)
-	argsJSON, err := json.Marshal(worker)
+	argsJSON, err := json.Marshal(workerWithArgs)
 	if err != nil {
 		return fmt.Errorf("failed to serialize job args: %w", err)
 	}
@@ -161,7 +187,84 @@ func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOption
 	return s.driver.Exec(
 		ctx,
 		insertSQL,
-		worker.(interface{ JobName() string }).JobName(),
+		workerWithArgs.(interface{ JobName() string }).JobName(),
+		string(jobOpts.Queue),
+		argsJSON,
+		jobOpts.Priority,
+		jobOpts.RunAt,
+	)
+}
+
+// AddJobWithTx enqueues a new job as part of an existing transaction. The transaction must be
+// compatible with the driver being used (pgx.Tx for PgxDriver or *sql.Tx for SQLDriver).
+// The caller is responsible for committing or rolling back the transaction.
+//
+// Example with pgx:
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//
+//	err := swig.AddJobWithTx(ctx, tx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	return tx.Commit(ctx)
+//
+// Example with database/sql:
+//
+//	tx, _ := db.BeginTx(ctx, nil)
+//	defer tx.Rollback()
+//
+//	err := swig.AddJobWithTx(ctx, tx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	return tx.Commit()
+func (s *Swig) AddJobWithTx(ctx context.Context, tx interface{}, workerWithArgs interface{}, opts ...JobOptions) error {
+	// Type assert to check if it implements Worker interface
+	if _, ok := workerWithArgs.(interface{ JobName() string }); !ok {
+		return fmt.Errorf("workerWithArgs must implement JobName() string")
+	}
+
+	// Get transaction adapter from driver
+	txAdapter, err := s.driver.AddJobWithTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("invalid transaction for driver: %w", err)
+	}
+
+	// Use default options if none provided
+	jobOpts := DefaultJobOptions()
+	if len(opts) > 0 {
+		jobOpts = opts[0]
+	}
+
+	// Serialize the worker (which contains the args)
+	argsJSON, err := json.Marshal(workerWithArgs)
+	if err != nil {
+		return fmt.Errorf("failed to serialize job args: %w", err)
+	}
+
+	insertSQL := `
+		INSERT INTO swig_jobs (
+			kind,
+			queue,
+			payload,
+			priority,
+			scheduled_for,
+			status
+		) VALUES ($1, $2, $3, $4, $5, 'pending')
+	`
+
+	return txAdapter.Exec(
+		ctx,
+		insertSQL,
+		workerWithArgs.(interface{ JobName() string }).JobName(),
 		string(jobOpts.Queue),
 		argsJSON,
 		jobOpts.Priority,
