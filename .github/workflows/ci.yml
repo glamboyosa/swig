@@ -64,16 +64,21 @@ jobs:
     - name: Bump version
       id: bump_version
       run: |
-        current_version=${LATEST_TAG#v}
-        if [[ $current_version == *"-alpha"* ]]; then
-          base_version=${current_version%-alpha}
-          IFS='.' read -r major minor patch <<< "$base_version"
-          new_version="$major.$minor.$((patch+1))-alpha"
-        else
-          new_version="0.0.1-alpha"
-        fi
-        echo "version=v$new_version" >> "$GITHUB_OUTPUT"
-
+          current_version=${LATEST_TAG#v}
+          if [[ $current_version == *"-alpha"* ]]; then
+            base_version=${current_version%-alpha}
+            IFS='.' read -r major minor patch <<< "$base_version"
+            # If we're still on 0.0.x, jump to 0.1.0
+            if [[ $major == "0" && $minor == "0" ]]; then
+              new_version="0.1.0-alpha"
+            else
+              new_version="$major.$minor.$((patch+1))-alpha"
+            fi
+          else
+            new_version="0.1.0-alpha"
+          fi
+          echo "version=v$new_version" >> "$GITHUB_OUTPUT"
+  
     - name: Create and push tag
       run: |
         git config --local user.email "action@github.com"
