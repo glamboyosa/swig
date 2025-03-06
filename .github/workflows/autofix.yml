@@ -1,5 +1,7 @@
 name: autofix.ci
-on: workflow_dispatch
+on:
+  pull_request:
+    branches: [ main ]
 
 jobs:
   autofix:
