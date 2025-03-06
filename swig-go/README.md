@@ -5,7 +5,11 @@ This directory contains the Go implementation of Swig. For full documentation, e
 ⚠️ **Alpha Status**: This implementation is currently in alpha. While it's being used in production, the API may change before v1.0.0. Pin to a specific version for stability:
 
 ```bash
-go get github.com/swig/swig-go@v0.0.1-alpha
+go get github.com/swig/swig-go@v0.0.4-alpha
+```
+import it like: 
+```go 
+import swig "github.com/glamboyosa/swig/swig-go"
 ```
 
 ## Quick Links
@@ -33,7 +37,7 @@ go get github.com/swig/swig-go@v0.0.1-alpha
 ## Installation
 
 ```bash
-go get github.com/swig/swig-go
+go get github.com/glamboyosa/swig/swig-go
 ```
 
 ## Supported Drivers
@@ -58,8 +62,8 @@ import (
     "github.com/jackc/pgx/v5/pgxpool"
     "database/sql"
     _ "github.com/lib/pq"
-    "github.com/swig/swig-go"
     "github.com/swig/swig-go/drivers"
+    import swig "github.com/glamboyosa/swig/swig-go"
 )
 
 // Define a worker

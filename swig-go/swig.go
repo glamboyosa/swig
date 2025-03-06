@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"swig/drivers"
-	"swig/workers"
 	"time"
+
+	"github.com/glamboyosa/swig/swig-go/drivers"
+	"github.com/glamboyosa/swig/swig-go/workers"
 )
 
 type QueueTypes string

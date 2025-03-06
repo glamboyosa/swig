@@ -1,4 +1,4 @@
-module swig
+module github.com/glamboyosa/swig/swig-go
 
 go 1.23.2
 
