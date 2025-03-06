@@ -82,8 +82,14 @@ go get github.com/swig/swig-go
 ## Supported Drivers
 
 Swig supports two PostgreSQL driver implementations:
-- `pgx` - Using the high-performance [pgx](https://github.com/jackc/pgx) driver
-- `sql` - Using Go's standard `database/sql` interface
+- `pgx` (Recommended) - Using the high-performance [pgx](https://github.com/jackc/pgx) driver
+  - Better performance
+  - Native LISTEN/NOTIFY support
+  - Real-time job notifications
+- `database/sql` - Using Go's standard `database/sql` interface
+  - **Important**: Requires `github.com/lib/pq` driver for LISTEN/NOTIFY support
+  - Must import with: `import _ "github.com/lib/pq"`
+  - Must use `postgres://` (not `postgresql://`) in connection strings
 
 ## Understanding Workers
 

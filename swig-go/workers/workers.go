@@ -16,6 +16,14 @@ type Job[T any] struct {
 	// Add any other metadata fields you want to expose to workers
 }
 
+// WorkerRegistry manages the registered job workers and their processing.
+// For job notifications, it uses PostgreSQL LISTEN/NOTIFY when available:
+// - With pgx driver: Native LISTEN/NOTIFY support
+// - With database/sql + lib/pq: LISTEN/NOTIFY if properly configured
+// - Fallback: Polling for new jobs if LISTEN/NOTIFY is unavailable
+//
+// TODO: Implement polling fallback for environments where LISTEN/NOTIFY
+// is not available or configured.
 type WorkerRegistry struct {
 	workers map[string]interface{} // stores Worker[T] instances
 }
@@ -43,4 +51,3 @@ func (wr *WorkerRegistry) RegisterWorker(worker interface{}) error {
 }
 
 // REMEMEBER TO TELL USERS TO IMPLEMENT A JOB WORKER I.E. SORTWORKER
-
