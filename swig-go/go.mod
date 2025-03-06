@@ -1,8 +1,10 @@
 module github.com/glamboyosa/swig/swig-go
 
-go 1.23.2
+go 1.23.0
 
-require github.com/jackc/pgx/v5 v5.7.2
+toolchain go1.23.2
+
+require github.com/jackc/pgx/v5 v5.5.5
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
