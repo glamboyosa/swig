@@ -138,11 +138,28 @@ func DefaultJobOptions() JobOptions {
 	}
 }
 
-// AddJob is now a regular method that takes an interface{}
-func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOptions) error {
+// AddJob enqueues a new job for processing. The workerWithArgs must be a struct that:
+//  1. Implements JobName() string to identify the worker type
+//  2. Implements Process(context.Context) error for job execution
+//  3. Contains JSON-serializable fields that will be passed to Process
+//
+// Job options can be provided to configure queue, priority, and scheduling.
+// If no options are provided, the job will be added to the default queue with normal priority
+// and immediate execution.
+//
+// Example:
+//
+//	err := swig.AddJob(ctx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	}, swig.JobOptions{
+//	    Queue: swig.Priority,
+//	    RunAt: time.Now().Add(time.Hour),
+//	})
+func (s *Swig) AddJob(ctx context.Context, workerWithArgs interface{}, opts ...JobOptions) error {
 	// Type assert to check if it implements Worker interface
-	if _, ok := worker.(interface{ JobName() string }); !ok {
-		return fmt.Errorf("worker must implement JobName() string")
+	if _, ok := workerWithArgs.(interface{ JobName() string }); !ok {
+		return fmt.Errorf("workerWithArgs must implement JobName() string")
 	}
 	// Use default options if none provided
 	jobOpts := DefaultJobOptions()
@@ -151,7 +168,7 @@ func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOption
 	}
 
 	// Serialize the worker (which contains the args)
-	argsJSON, err := json.Marshal(worker)
+	argsJSON, err := json.Marshal(workerWithArgs)
 	if err != nil {
 		return fmt.Errorf("failed to serialize job args: %w", err)
 	}
@@ -170,7 +187,7 @@ func (s *Swig) AddJob(ctx context.Context, worker interface{}, opts ...JobOption
 	return s.driver.Exec(
 		ctx,
 		insertSQL,
-		worker.(interface{ JobName() string }).JobName(),
+		workerWithArgs.(interface{ JobName() string }).JobName(),
 		string(jobOpts.Queue),
 		argsJSON,
 		jobOpts.Priority,
