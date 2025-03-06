@@ -20,7 +20,10 @@ go get github.com/swig/swig-go@v0.0.1-alpha
 ## Features
 
 - **PostgreSQL-Powered**: Leverages PostgreSQL's SKIP LOCK for efficient job distribution
-- **Transactional Integrity**: Jobs are processed exactly once with transactional guarantees
+- **Transactional Integrity**: Three levels of transaction control:
+  - `AddJobWithTx`: Use your existing database transactions
+  - `WithTx`: Let Swig manage transactions
+  - `AddJob`: Simple non-transactional enqueueing
 - **Leader Election**: Built-in leader election using advisory locks
 - **Multiple Queue Support**: Priority and default queues out of the box
 - **Type-Safe Job Arguments**: Strongly typed job arguments with Go generics

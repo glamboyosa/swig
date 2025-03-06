@@ -93,3 +93,11 @@ func (d *SQLDriver) Notify(ctx context.Context, channel string, payload string) 
 	_, err := d.db.ExecContext(ctx, "SELECT pg_notify($1, $2)", channel, payload)
 	return err
 }
+
+// AddJobWithTx accepts an external database/sql transaction and wraps it in our Transaction interface
+func (d *SQLDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error) {
+	if sqlTx, ok := tx.(*sql.Tx); ok {
+		return &sqlTxAdapter{tx: sqlTx}, nil
+	}
+	return nil, errors.New("invalid transaction type: expected *sql.Tx")
+}

@@ -12,23 +12,57 @@ go get github.com/swig/swig-go@v0.0.1-alpha
 
 ## Why Transactional Integrity Matters
 
-In distributed systems, especially job queues, transactional integrity is crucial. Here's why:
+In distributed systems, especially job queues, transactional integrity is crucial. Swig offers three levels of transaction control:
 
-- **No Lost Jobs**: Jobs are either fully committed or not at all. If your application crashes while enqueueing a job, you won't have partially created jobs.
-- **Atomic Processing**: Jobs are processed exactly once. Using PostgreSQL's SKIP LOCK ensures no two workers can process the same job.
-- **Data Consistency**: Jobs can be part of your application's transactions. For example, when creating a user:
-  ```go
-  tx, _ := db.BeginTx(ctx)
-  // Create user
-  userID := createUser(tx)
-  // Enqueue welcome email in the same transaction
-  swigClient.AddJob(ctx, &EmailWorker{
-      To: email,
-      Subject: "Welcome!",
-  })
-  tx.Commit()
-  ```
-  If either the user creation or job enqueueing fails, everything is rolled back. No welcome emails for non-existent users!
+1. **Bring Your Own Transaction** (Recommended): Use your existing database transaction:
+```go
+tx, _ := pool.Begin(ctx)
+defer tx.Rollback(ctx)
+
+// Create user
+userID := createUser(tx)
+
+// Enqueue welcome email in same transaction
+err := swigClient.AddJobWithTx(ctx, tx, &EmailWorker{
+    To: email,
+    Subject: "Welcome!",
+})
+if err != nil {
+    return err
+}
+return tx.Commit(ctx)
+```
+
+2. **Use Swig's Transaction Helper**: Let Swig manage the transaction:
+```go
+err := swigClient.driver.WithTx(ctx, func(tx Transaction) error {
+    // Create user
+    if err := createUser(tx); err != nil {
+        return err // Triggers rollback
+    }
+    
+    // Add job (auto rollback if this fails)
+    return tx.Exec(ctx, insertJobSQL, ...)
+})
+```
+
+3. **No Transaction** (Simple): Just enqueue a job:
+```go
+err := swigClient.AddJob(ctx, &EmailWorker{
+    To: email,
+    Subject: "Welcome!",
+})
+```
+
+Choose the approach that best fits your needs:
+- Use `AddJobWithTx` when you need to coordinate jobs with your application's data
+- Use `WithTx` when you want automatic transaction management
+- Use `AddJob` for simple, non-transactional job enqueueing
+
+Benefits of transactional job enqueueing:
+- **No Lost Jobs**: Jobs are either fully committed or not at all
+- **Atomic Processing**: Jobs are processed exactly once using PostgreSQL's SKIP LOCK
+- **Data Consistency**: Jobs can be part of your application's transactions
 
 ## Features
 

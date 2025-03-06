@@ -194,3 +194,80 @@ func (s *Swig) AddJob(ctx context.Context, workerWithArgs interface{}, opts ...J
 		jobOpts.RunAt,
 	)
 }
+
+// AddJobWithTx enqueues a new job as part of an existing transaction. The transaction must be
+// compatible with the driver being used (pgx.Tx for PgxDriver or *sql.Tx for SQLDriver).
+// The caller is responsible for committing or rolling back the transaction.
+//
+// Example with pgx:
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//
+//	err := swig.AddJobWithTx(ctx, tx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	return tx.Commit(ctx)
+//
+// Example with database/sql:
+//
+//	tx, _ := db.BeginTx(ctx, nil)
+//	defer tx.Rollback()
+//
+//	err := swig.AddJobWithTx(ctx, tx, &EmailWorker{
+//	    To: "user@example.com",
+//	    Subject: "Welcome!",
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	return tx.Commit()
+func (s *Swig) AddJobWithTx(ctx context.Context, tx interface{}, workerWithArgs interface{}, opts ...JobOptions) error {
+	// Type assert to check if it implements Worker interface
+	if _, ok := workerWithArgs.(interface{ JobName() string }); !ok {
+		return fmt.Errorf("workerWithArgs must implement JobName() string")
+	}
+
+	// Get transaction adapter from driver
+	txAdapter, err := s.driver.AddJobWithTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("invalid transaction for driver: %w", err)
+	}
+
+	// Use default options if none provided
+	jobOpts := DefaultJobOptions()
+	if len(opts) > 0 {
+		jobOpts = opts[0]
+	}
+
+	// Serialize the worker (which contains the args)
+	argsJSON, err := json.Marshal(workerWithArgs)
+	if err != nil {
+		return fmt.Errorf("failed to serialize job args: %w", err)
+	}
+
+	insertSQL := `
+		INSERT INTO swig_jobs (
+			kind,
+			queue,
+			payload,
+			priority,
+			scheduled_for,
+			status
+		) VALUES ($1, $2, $3, $4, $5, 'pending')
+	`
+
+	return txAdapter.Exec(
+		ctx,
+		insertSQL,
+		workerWithArgs.(interface{ JobName() string }).JobName(),
+		string(jobOpts.Queue),
+		argsJSON,
+		jobOpts.Priority,
+		jobOpts.RunAt,
+	)
+}

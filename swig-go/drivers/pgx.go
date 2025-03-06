@@ -96,3 +96,11 @@ func (d *PgxDriver) Notify(ctx context.Context, channel string, payload string) 
 	_, err := d.pool.Exec(ctx, "SELECT pg_notify($1, $2)", channel, payload)
 	return err
 }
+
+// AddJobWithTx accepts an external pgx transaction and wraps it in our Transaction interface
+func (d *PgxDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error) {
+	if pgxTx, ok := tx.(pgx.Tx); ok {
+		return &pgxTxAdapter{tx: pgxTx}, nil
+	}
+	return nil, errors.New("invalid transaction type: expected pgx.Tx")
+}
