@@ -94,16 +94,16 @@ func main() {
     // driver, _ := drivers.NewSQLDriver(db)
     
     // Create and configure worker registry
-    registry := swig.NewWorkerRegistry()
-    registry.Register(&EmailWorker{})
+    workers := swig.NewWorkerRegistry()
+    workers.RegisterWorker(&EmailWorker{})
     
     // Configure queues (default setup)
     configs := []swig.SwigQueueConfig{
         {QueueType: swig.Default, MaxWorkers: 5},
     }
     
-    // Create and start Swig with registry
-    swigClient := swig.NewSwig(driver, configs, registry)
+    // Create and start Swig with worker registry
+    swigClient := swig.NewSwig(driver, configs, workers)
     swigClient.Start(ctx)
     
     // Add a job (uses default queue)

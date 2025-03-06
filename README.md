@@ -159,16 +159,16 @@ func main() {
     // driver, _ := drivers.NewSQLDriver(db)
     
     // Create a worker registry and register your workers
-    registry := swig.NewWorkerRegistry()
-    registry.Register(&EmailWorker{})
+    workers := swig.NewWorkerRegistry()
+    workers.RegisterWorker(&EmailWorker{})
     
     // Configure queues (default setup)
     configs := []swig.SwigQueueConfig{
         {QueueType: swig.Default, MaxWorkers: 5},
     }
     
-    // Create and start Swig with the worker registry
-    swigClient := swig.NewSwig(driver, configs, registry)
+    // Create and start Swig with worker registry
+    swigClient := swig.NewSwig(driver, configs, workers)
     swigClient.Start(ctx)
     
     // Add a job (uses default queue)
@@ -251,18 +251,18 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Worker Registration
 
-Workers must be registered with Swig before they can process jobs. This is done through the worker registry:
+Workers must be registered with Swig before they can process jobs:
 
 ```go
-// Create a registry
-registry := swig.NewWorkerRegistry()
+// Create workers registry
+workers := swig.NewWorkerRegistry()
 
 // Register workers
-registry.Register(&EmailWorker{})
-registry.Register(&ImageResizeWorker{})
+workers.RegisterWorker(&EmailWorker{})
+workers.RegisterWorker(&ImageResizeWorker{})
 
-// Pass registry to Swig
-swigClient := swig.NewSwig(driver, configs, registry)
+// Pass workers to Swig
+swigClient := swig.NewSwig(driver, configs, workers)
 ```
 
 The registry ensures that:
