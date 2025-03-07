@@ -12,7 +12,8 @@ import (
 )
 
 type SQLDriver struct {
-	db *sql.DB
+	db      *sql.DB
+	connStr string
 }
 
 type sqlTxAdapter struct {
@@ -52,11 +53,31 @@ func (tx *sqlTxAdapter) QueryRow(ctx context.Context, sql string, args ...interf
 	return tx.tx.QueryRowContext(ctx, sql, args...)
 }
 
-func NewSQLDriver(db *sql.DB) (Driver, error) {
+// NewSQLDriver creates a new database/sql driver implementation for PostgreSQL.
+// It requires both a database connection and the original connection string because
+// the lib/pq notification listener needs the connection string for establishing
+// its own connection.
+//
+// Parameters:
+//   - db: An initialized *sql.DB connection pool
+//   - connStr: The PostgreSQL connection string (e.g., "postgres://user:pass@localhost:5432/dbname")
+//
+// Returns:
+//   - Driver: The database driver implementation
+//   - error: Non-nil if the database connection is nil
+//
+// Example:
+//
+//	db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
+//	driver, err := NewSQLDriver(db, "postgres://localhost:5432/myapp")
+func NewSQLDriver(db *sql.DB, connStr string) (Driver, error) {
 	if db == nil {
 		return nil, errors.New("nil database connection")
 	}
-	return &SQLDriver{db: db}, nil
+	return &SQLDriver{
+		db:      db,
+		connStr: connStr,
+	}, nil
 }
 
 func (d *SQLDriver) WithTx(ctx context.Context, fn func(tx Transaction) error) error {
@@ -109,11 +130,7 @@ func (d *SQLDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transacti
 
 // WaitForNotification waits for a notification on any channel this connection is listening on
 func (d *SQLDriver) WaitForNotification(ctx context.Context) (*Notification, error) {
-	// For database/sql with lib/pq, we need to use a dedicated listener connection
-	// This is because lib/pq's LISTEN/NOTIFY works differently from pgx
-
-	// Create a new connection for listening
-	listener := pq.NewListener(d.db.Driver().(*pq.Driver).Config().ConnConfig.String(),
+	listener := pq.NewListener(d.connStr,
 		10*time.Second, // Max reconnect wait
 		time.Minute,    // Max ping interval
 		func(ev pq.ListenerEventType, err error) {

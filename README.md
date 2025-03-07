@@ -160,7 +160,7 @@ func main() {
     
     // Option B: Using database/sql
     // db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
-    // driver, _ := drivers.NewSQLDriver(db)
+    // driver, _ := drivers.NewSQLDriver(db, connString)
     
     // Create a worker registry and register your workers
     workers := swig.NewWorkerRegistry()
