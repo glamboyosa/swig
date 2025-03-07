@@ -332,6 +332,7 @@ func (s *Swig) startWorker(ctx context.Context, queueType QueueTypes) {
 // processNextJob attempts to acquire and process the next available job using SKIP LOCKED
 func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	// Acquire a job with FOR UPDATE SKIP LOCKED
+	// Always check priority queue first, then fall back to assigned queue
 	acquireSQL := `
 		UPDATE swig_jobs
 		SET status = 'processing',
@@ -341,10 +342,28 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 		WHERE id = (
 			SELECT id
 			FROM swig_jobs
-			WHERE queue = $1
-				AND status = 'pending'
+			WHERE status = 'pending'
 				AND scheduled_for <= NOW()
-			ORDER BY priority DESC, created_at
+				AND (
+					-- First try to get priority jobs (if any exist)
+					(queue = 'priority' AND EXISTS (
+						SELECT 1 FROM swig_jobs 
+						WHERE queue = 'priority' 
+						AND status = 'pending'
+						AND scheduled_for <= NOW()
+					))
+					-- If no priority jobs, use the worker's assigned queue
+					OR (queue = $1 AND NOT EXISTS (
+						SELECT 1 FROM swig_jobs 
+						WHERE queue = 'priority' 
+						AND status = 'pending'
+						AND scheduled_for <= NOW()
+					))
+				)
+			ORDER BY 
+				queue = 'priority' DESC, -- Priority queue jobs first
+				priority DESC,           -- Then by job priority
+				created_at              -- Finally by age
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
