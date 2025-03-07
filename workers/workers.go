@@ -39,7 +39,9 @@ func NewWorkerRegistry() *WorkerRegistry {
 	}
 }
 
-// RegisterWorker now uses interface{} with runtime type checking
+// RegisterWorker adds a worker implementation to the registry.
+// It accepts any type that implements the Worker interface and performs
+// runtime type checking to ensure the worker is properly implemented.
 func (wr *WorkerRegistry) RegisterWorker(worker interface{}) error {
 	// Type assert to check if it implements required methods
 	if w, ok := worker.(interface{ JobName() string }); !ok {
@@ -50,4 +52,8 @@ func (wr *WorkerRegistry) RegisterWorker(worker interface{}) error {
 	}
 }
 
-// REMEMEBER TO TELL USERS TO IMPLEMENT A JOB WORKER I.E. SORTWORKER
+// GetWorker retrieves a worker implementation by its job name
+func (wr *WorkerRegistry) GetWorker(jobName string) (interface{}, bool) {
+	worker, exists := wr.workers[jobName]
+	return worker, exists
+}

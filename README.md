@@ -7,7 +7,7 @@ Swig is a robust, PostgreSQL-backed job queue system for Go applications, design
 ⚠️ **Alpha Status**: Swig is currently in alpha and actively being developed towards v1.0.0. The API may undergo changes during this phase. For stability in production environments, we strongly recommend pinning to a specific version:
 
 ```bash
-go get github.com/glamboyosa/swig@v0.1.1-alpha
+go get github.com/glamboyosa/swig@v0.1.4-alpha
 ```
 import it like: 
 ```go 
@@ -160,7 +160,7 @@ func main() {
     
     // Option B: Using database/sql
     // db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
-    // driver, _ := drivers.NewSQLDriver(db)
+    // driver, _ := drivers.NewSQLDriver(db, connString)
     
     // Create a worker registry and register your workers
     workers := swig.NewWorkerRegistry()

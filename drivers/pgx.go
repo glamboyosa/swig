@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -50,6 +51,24 @@ func (tx *pgxTxAdapter) QueryRow(ctx context.Context, sql string, args ...interf
 	return tx.tx.QueryRow(ctx, sql, args...)
 }
 
+// NewPgxDriver creates a new pgx-based driver implementation for PostgreSQL.
+// It uses pgx's native connection pool for better performance and features like
+// automatic connection recovery, statement caching, and native LISTEN/NOTIFY support.
+//
+// Parameters:
+//   - pool: A *pgxpool.Pool instance. Must be initialized and connected.
+//     The pool handles connection lifecycle and maintains a connection pool
+//     for optimal performance.
+//
+// Returns:
+//   - Driver: The database driver implementation
+//   - error: Non-nil if the pool is nil or of wrong type
+//
+// Example:
+//
+//	config, _ := pgxpool.ParseConfig("postgres://localhost:5432/myapp")
+//	pool, _ := pgxpool.NewWithConfig(context.Background(), config)
+//	driver, err := NewPgxDriver(pool)
 func NewPgxDriver(pool interface{}) (Driver, error) {
 	if pgxPool, ok := pool.(*pgxpool.Pool); ok {
 		return &PgxDriver{pool: pgxPool}, nil
@@ -103,4 +122,24 @@ func (d *PgxDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transacti
 		return &pgxTxAdapter{tx: pgxTx}, nil
 	}
 	return nil, errors.New("invalid transaction type: expected pgx.Tx")
+}
+
+// WaitForNotification waits for a notification on any channel this connection is listening on
+func (d *PgxDriver) WaitForNotification(ctx context.Context) (*Notification, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Wait for notification
+	pgxNotification, err := conn.Conn().WaitForNotification(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait for notification error: %w", err)
+	}
+
+	return &Notification{
+		Channel: pgxNotification.Channel,
+		Payload: pgxNotification.Payload,
+	}, nil
 }
