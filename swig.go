@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/glamboyosa/swig/drivers"
+	"github.com/glamboyosa/swig/pkg"
 	"github.com/glamboyosa/swig/workers"
 )
 
@@ -18,6 +19,11 @@ type QueueTypes string
 const (
 	Default  QueueTypes = "default"
 	Priority QueueTypes = "priority"
+
+	leaderLockID  = 1234567 // Arbitrary number for advisory lock
+	leaderKey     = "queue_leader"
+	leaderTTL     = 30 * time.Second
+	retryInterval = 5 * time.Second
 )
 
 // minimum number of workers to start
@@ -37,6 +43,7 @@ type Swig struct {
 	activeWorkers   sync.WaitGroup // Track active workers
 	shutdown        chan struct{}  // Signal for graceful shutdown
 	leaderID        string         // Current leader ID if we're the leader
+	workerID        string         // Unique ID for this worker instance
 }
 
 // NewSwig creates a new job queue instance with the specified database driver,
@@ -63,7 +70,93 @@ func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers w
 		swigQueueConfig: swigQueueConfig,
 		Workers:         workers,
 		shutdown:        make(chan struct{}),
+		workerID:        pkg.GenerateWorkerID(),
 	}
+}
+
+// tryBecomeLeader attempts to acquire leadership using advisory locks
+func (s *Swig) tryBecomeLeader(ctx context.Context) error {
+	// Try to acquire advisory lock
+	var acquired bool
+	err := s.driver.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLockID).Scan(&acquired)
+	if err != nil || !acquired {
+		return fmt.Errorf("failed to acquire leader lock: %w", err)
+	}
+
+	// If we got the lock, update the leader table
+	s.leaderID = pkg.GenerateWorkerID()
+	err = s.driver.Exec(ctx, `
+		INSERT INTO swig_leader (id, leader_id, expires_at)
+		VALUES ($1, $2, NOW() + $3::interval)
+		ON CONFLICT (id) DO UPDATE
+		SET leader_id = $2,
+			expires_at = NOW() + $3::interval
+	`, leaderKey, s.leaderID, leaderTTL.String())
+
+	if err != nil {
+		// Release the advisory lock if we couldn't update the table
+		s.driver.Exec(ctx, `SELECT pg_advisory_unlock($1)`, leaderLockID)
+		return fmt.Errorf("failed to update leader record: %w", err)
+	}
+
+	// Start leader duties in background
+	go s.performLeaderDuties(ctx)
+
+	return nil
+}
+
+// performLeaderDuties handles leader responsibilities like retrying failed jobs
+func (s *Swig) performLeaderDuties(ctx context.Context) {
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdown:
+			return
+		case <-ticker.C:
+			if err := s.retryFailedJobs(ctx); err != nil {
+				log.Printf("Error retrying failed jobs: %v", err)
+			}
+		}
+	}
+}
+
+// retryFailedJobs finds failed jobs that can be retried and requeues them
+func (s *Swig) retryFailedJobs(ctx context.Context) error {
+	// Find failed jobs that haven't exceeded max attempts
+	retrySQL := `
+		UPDATE swig_jobs
+		SET status = 'pending',
+			locked_by = NULL,
+			locked_at = NULL
+		WHERE status = 'failed'
+			AND attempts < max_attempts
+			AND (locked_by IS NULL OR locked_at < NOW() - interval '5 minutes')
+		RETURNING id`
+
+	var jobIDs []string
+	rows, err := s.driver.Query(ctx, retrySQL)
+	if err != nil {
+		return fmt.Errorf("failed to query failed jobs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("failed to scan job ID: %w", err)
+		}
+		jobIDs = append(jobIDs, id)
+	}
+
+	if len(jobIDs) > 0 {
+		log.Printf("Requeued %d failed jobs for retry", len(jobIDs))
+	}
+
+	return nil
 }
 
 // Start initializes the Swig queue and creates the necessary tables
@@ -80,7 +173,8 @@ func (s *Swig) Start(ctx context.Context) {
 		max_attempts INTEGER NOT NULL DEFAULT 3,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		scheduled_for TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		locked_by UUID,
+		instance_id UUID,           -- ID of the Swig instance
+		worker_id UUID,             -- ID of the specific worker
 		locked_at TIMESTAMPTZ,
 		last_error TEXT,
 		
@@ -127,6 +221,11 @@ func (s *Swig) Start(ctx context.Context) {
 	s.driver.Exec(ctx, createTableSQL)
 	s.driver.Exec(ctx, createLeaderTableSQL)
 
+	// Try to become leader
+	if err := s.tryBecomeLeader(ctx); err != nil {
+		log.Printf("Failed to become leader: %v", err)
+	}
+
 	// Start worker pools for each queue
 	for _, config := range s.swigQueueConfig {
 		workers := config.MaxWorkers
@@ -170,7 +269,16 @@ func (s *Swig) Stop(ctx context.Context) error {
 		log.Printf("All workers gracefully shutdown")
 	case <-ctx.Done():
 		log.Printf("Shutdown timed out after %v, some workers may still be running", defaultShutdownTimeout)
+		// Even if we timeout, try to cleanup any jobs this instance was processing
+		if err := s.cleanupInstanceJobs(ctx); err != nil {
+			log.Printf("Failed to cleanup instance jobs: %v", err)
+		}
 		return fmt.Errorf("shutdown timed out: %w", ctx.Err())
+	}
+
+	// Cleanup any jobs this instance was processing
+	if err := s.cleanupInstanceJobs(ctx); err != nil {
+		log.Printf("Failed to cleanup instance jobs: %v", err)
 	}
 
 	// Release any leader locks we might be holding
@@ -182,6 +290,11 @@ func (s *Swig) Stop(ctx context.Context) error {
 		if err := s.driver.Exec(ctx, unlockSQL, s.leaderID); err != nil {
 			log.Printf("Failed to release leader lock: %v", err)
 		}
+
+		// Also release the advisory lock
+		if err := s.driver.Exec(ctx, `SELECT pg_advisory_unlock($1)`, leaderLockID); err != nil {
+			log.Printf("Failed to release advisory lock: %v", err)
+		}
 	}
 
 	// Close database connections cleanly
@@ -189,6 +302,46 @@ func (s *Swig) Stop(ctx context.Context) error {
 		if err := closer.Close(); err != nil {
 			log.Printf("Failed to close database connection: %v", err)
 		}
+	}
+
+	return nil
+}
+
+// cleanupInstanceJobs resets any jobs that were being processed by this instance
+func (s *Swig) cleanupInstanceJobs(ctx context.Context) error {
+	cleanupSQL := `
+		UPDATE swig_jobs
+		SET status = CASE 
+				WHEN attempts >= max_attempts THEN 'failed'
+				ELSE 'pending'
+			END,
+			instance_id = NULL,
+			worker_id = NULL,
+			locked_at = NULL,
+			last_error = CASE 
+				WHEN attempts >= max_attempts THEN 'Job failed due to instance shutdown'
+				ELSE last_error
+			END
+		WHERE instance_id = $1
+		RETURNING id`
+
+	var jobIDs []string
+	rows, err := s.driver.Query(ctx, cleanupSQL, s.workerID)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup instance jobs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("failed to scan job ID: %w", err)
+		}
+		jobIDs = append(jobIDs, id)
+	}
+
+	if len(jobIDs) > 0 {
+		log.Printf("Cleaned up %d jobs during shutdown", len(jobIDs))
 	}
 
 	return nil
@@ -372,12 +525,14 @@ func (s *Swig) startWorker(ctx context.Context, queueType QueueTypes) {
 
 // processNextJob attempts to acquire and process the next available job using SKIP LOCKED
 func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
-	// Acquire a job with FOR UPDATE SKIP LOCKED
-	// Always check priority queue first, then fall back to assigned queue
+	// Generate unique worker ID for this job acquisition
+	workerID := pkg.GenerateWorkerID()
+
 	acquireSQL := `
 		UPDATE swig_jobs
 		SET status = 'processing',
-			locked_by = gen_random_uuid(),
+			instance_id = $2,        -- Track Swig instance
+			worker_id = $3,          -- Track specific worker
 			locked_at = NOW(),
 			attempts = attempts + 1
 		WHERE id = (
@@ -386,14 +541,12 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 			WHERE status = 'pending'
 				AND scheduled_for <= NOW()
 				AND (
-					-- First try to get priority jobs (if any exist)
 					(queue = 'priority' AND EXISTS (
 						SELECT 1 FROM swig_jobs 
 						WHERE queue = 'priority' 
 						AND status = 'pending'
 						AND scheduled_for <= NOW()
 					))
-					-- If no priority jobs, use the worker's assigned queue
 					OR (queue = $1 AND NOT EXISTS (
 						SELECT 1 FROM swig_jobs 
 						WHERE queue = 'priority' 
@@ -402,9 +555,9 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 					))
 				)
 			ORDER BY 
-				queue = 'priority' DESC, -- Priority queue jobs first
-				priority DESC,           -- Then by job priority
-				created_at              -- Finally by age
+				queue = 'priority' DESC,
+				priority DESC,
+				created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
@@ -414,7 +567,7 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	var kind string
 	var payload []byte
 
-	err := s.driver.QueryRow(ctx, acquireSQL, string(queueType)).Scan(&jobID, &kind, &payload)
+	err := s.driver.QueryRow(ctx, acquireSQL, string(queueType), s.workerID, workerID).Scan(&jobID, &kind, &payload)
 	if err == sql.ErrNoRows {
 		// No jobs available, wait for notification
 		notification, err := s.driver.WaitForNotification(ctx)
@@ -444,26 +597,27 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	err = worker.(interface{ Process(context.Context) error }).Process(ctx)
 
 	// Update job status based on processing result
-	var updateSQL string
 	if err != nil {
-		updateSQL = `
+		updateSQL := `
 			UPDATE swig_jobs
 			SET status = CASE 
 					WHEN attempts >= max_attempts THEN 'failed'
 					ELSE 'pending'
 				END,
 				last_error = $2,
-				locked_by = NULL,
+				instance_id = NULL,
+				worker_id = NULL,
 				locked_at = NULL
 			WHERE id = $1`
 		if err := s.driver.Exec(ctx, updateSQL, jobID, err.Error()); err != nil {
 			return fmt.Errorf("failed to update failed job: %w", err)
 		}
 	} else {
-		updateSQL = `
+		updateSQL := `
 			UPDATE swig_jobs
 			SET status = 'completed',
-				locked_by = NULL,
+				instance_id = NULL,
+				worker_id = NULL,
 				locked_at = NULL
 			WHERE id = $1`
 		if err := s.driver.Exec(ctx, updateSQL, jobID); err != nil {
