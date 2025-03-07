@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/glamboyosa/swig/drivers"
@@ -22,6 +23,9 @@ const (
 // minimum number of workers to start
 const minWorkers = 3
 
+// Default timeout for graceful shutdown
+const defaultShutdownTimeout = 30 * time.Second
+
 type SwigQueueConfig struct {
 	QueueType  QueueTypes
 	MaxWorkers int
@@ -30,6 +34,9 @@ type Swig struct {
 	swigQueueConfig []SwigQueueConfig
 	driver          drivers.Driver
 	Workers         workers.WorkerRegistry
+	activeWorkers   sync.WaitGroup // Track active workers
+	shutdown        chan struct{}  // Signal for graceful shutdown
+	leaderID        string         // Current leader ID if we're the leader
 }
 
 // NewSwig creates a new job queue instance with the specified database driver,
@@ -55,6 +62,7 @@ func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers w
 		driver:          driver,
 		swigQueueConfig: swigQueueConfig,
 		Workers:         workers,
+		shutdown:        make(chan struct{}),
 	}
 }
 
@@ -128,27 +136,60 @@ func (s *Swig) Start(ctx context.Context) {
 
 		// Start worker pool for this queue
 		for i := 0; i < workers; i++ {
-			go s.startWorker(ctx, config.QueueType)
+			s.activeWorkers.Add(1)
+			go func(qType QueueTypes) {
+				defer s.activeWorkers.Done()
+				s.startWorker(ctx, qType)
+			}(config.QueueType)
 		}
 	}
 }
 
 // Wait for active workers to finish and release any leader locks we might be holding
 func (s *Swig) Stop(ctx context.Context) error {
-	// Release any leader locks we might be holding
-	// unlockSQL := `
-	//     DELETE FROM swig_leader
-	//     WHERE leader_id = $1
-	// `
-	// // Assuming we store our leader_id somewhere in Swig struct
-	// if err := s.driver.Exec(ctx, unlockSQL, s.leaderID); err != nil {
-	// 	return err
-	// }
+	if _, ok := ctx.Deadline(); !ok {
+		// No timeout set, use default
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultShutdownTimeout)
+		defer cancel()
+	}
 
-	// // Close database connections cleanly
-	// if err := s.driver.Close(); err != nil {
-	// 	return err
-	// }
+	// Signal all workers to stop
+	close(s.shutdown)
+
+	// Wait for all workers to finish their current jobs
+	done := make(chan struct{})
+	go func() {
+		s.activeWorkers.Wait()
+		close(done)
+	}()
+
+	// Wait for workers to finish or timeout
+	select {
+	case <-done:
+		log.Printf("All workers gracefully shutdown")
+	case <-ctx.Done():
+		log.Printf("Shutdown timed out after %v, some workers may still be running", defaultShutdownTimeout)
+		return fmt.Errorf("shutdown timed out: %w", ctx.Err())
+	}
+
+	// Release any leader locks we might be holding
+	if s.leaderID != "" {
+		unlockSQL := `
+			DELETE FROM swig_leader
+			WHERE leader_id = $1
+		`
+		if err := s.driver.Exec(ctx, unlockSQL, s.leaderID); err != nil {
+			log.Printf("Failed to release leader lock: %v", err)
+		}
+	}
+
+	// Close database connections cleanly
+	if closer, ok := s.driver.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			log.Printf("Failed to close database connection: %v", err)
+		}
+	}
 
 	return nil
 }
