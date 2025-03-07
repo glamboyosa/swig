@@ -4,6 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 type SQLDriver struct {
@@ -100,4 +105,35 @@ func (d *SQLDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transacti
 		return &sqlTxAdapter{tx: sqlTx}, nil
 	}
 	return nil, errors.New("invalid transaction type: expected *sql.Tx")
+}
+
+// WaitForNotification waits for a notification on any channel this connection is listening on
+func (d *SQLDriver) WaitForNotification(ctx context.Context) (*Notification, error) {
+	// For database/sql with lib/pq, we need to use a dedicated listener connection
+	// This is because lib/pq's LISTEN/NOTIFY works differently from pgx
+
+	// Create a new connection for listening
+	listener := pq.NewListener(d.db.Driver().(*pq.Driver).Config().ConnConfig.String(),
+		10*time.Second, // Max reconnect wait
+		time.Minute,    // Max ping interval
+		func(ev pq.ListenerEventType, err error) {
+			if err != nil {
+				log.Printf("Listener error: %v\n", err)
+			}
+		})
+	defer listener.Close()
+
+	// Wait for notification or context cancellation
+	select {
+	case notification := <-listener.Notify:
+		if notification == nil {
+			return nil, fmt.Errorf("received nil notification")
+		}
+		return &Notification{
+			Channel: notification.Channel,
+			Payload: notification.Extra,
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

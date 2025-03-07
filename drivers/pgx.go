@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -103,4 +104,24 @@ func (d *PgxDriver) AddJobWithTx(ctx context.Context, tx interface{}) (Transacti
 		return &pgxTxAdapter{tx: pgxTx}, nil
 	}
 	return nil, errors.New("invalid transaction type: expected pgx.Tx")
+}
+
+// WaitForNotification waits for a notification on any channel this connection is listening on
+func (d *PgxDriver) WaitForNotification(ctx context.Context) (*Notification, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Wait for notification
+	pgxNotification, err := conn.Conn().WaitForNotification(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait for notification error: %w", err)
+	}
+
+	return &Notification{
+		Channel: pgxNotification.Channel,
+		Payload: pgxNotification.Payload,
+	}, nil
 }

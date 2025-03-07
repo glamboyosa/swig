@@ -2,8 +2,10 @@ package swig
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/glamboyosa/swig/drivers"
@@ -77,7 +79,28 @@ func (s *Swig) Start(ctx context.Context) {
 		CONSTRAINT valid_status CHECK (status IN (
 			'pending', 'processing', 'completed', 'failed', 'scheduled'
 		))
-	)`
+	);
+
+	-- Create notification trigger for real-time job processing
+	CREATE OR REPLACE FUNCTION notify_job_created()
+		RETURNS trigger AS $$
+	BEGIN
+		PERFORM pg_notify(
+			'swig_jobs',
+			json_build_object(
+				'id', NEW.id,
+				'queue', NEW.queue,
+				'kind', NEW.kind
+			)::text
+		);
+		RETURN NEW;
+	END;
+	$$ LANGUAGE plpgsql;
+
+	CREATE TRIGGER swig_jobs_notify_trigger
+		AFTER INSERT ON swig_jobs
+		FOR EACH ROW
+		EXECUTE FUNCTION notify_job_created();`
 
 	createLeaderTableSQL := `
 	CREATE TABLE IF NOT EXISTS swig_leader (
@@ -95,12 +118,19 @@ func (s *Swig) Start(ctx context.Context) {
 
 	s.driver.Exec(ctx, createTableSQL)
 	s.driver.Exec(ctx, createLeaderTableSQL)
-	//workers := make([]*Worker, len(s.swigQueueConfig))
-	// for _, config := range s.swigQueueConfig {
-	// 	for i := 0; i < config.MaxWorkers; i++ {
-	// 		go s.startWorker(config.QueueType)
-	// 	}
-	// }
+
+	// Start worker pools for each queue
+	for _, config := range s.swigQueueConfig {
+		workers := config.MaxWorkers
+		if workers < minWorkers {
+			workers = minWorkers
+		}
+
+		// Start worker pool for this queue
+		for i := 0; i < workers; i++ {
+			go s.startWorker(ctx, config.QueueType)
+		}
+	}
 }
 
 // Wait for active workers to finish and release any leader locks we might be holding
@@ -271,4 +301,115 @@ func (s *Swig) AddJobWithTx(ctx context.Context, tx interface{}, workerWithArgs 
 		jobOpts.Priority,
 		jobOpts.RunAt,
 	)
+}
+
+// startWorker runs a worker goroutine that:
+// 1. Listens for notifications about new jobs
+// 2. Attempts to acquire and process jobs using SELECT FOR UPDATE SKIP LOCKED
+// 3. Handles job completion and failure
+func (s *Swig) startWorker(ctx context.Context, queueType QueueTypes) {
+	// Start listening for notifications
+	if err := s.driver.Listen(ctx, "swig_jobs"); err != nil {
+		log.Printf("Failed to start listening: %v", err)
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// Try to acquire and process a job
+			if err := s.processNextJob(ctx, queueType); err != nil {
+				log.Printf("Error processing job: %v", err)
+				// Small backoff on error
+				time.Sleep(time.Second)
+			}
+		}
+	}
+}
+
+// processNextJob attempts to acquire and process the next available job using SKIP LOCKED
+func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
+	// Acquire a job with FOR UPDATE SKIP LOCKED
+	acquireSQL := `
+		UPDATE swig_jobs
+		SET status = 'processing',
+			locked_by = gen_random_uuid(),
+			locked_at = NOW(),
+			attempts = attempts + 1
+		WHERE id = (
+			SELECT id
+			FROM swig_jobs
+			WHERE queue = $1
+				AND status = 'pending'
+				AND scheduled_for <= NOW()
+			ORDER BY priority DESC, created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		RETURNING id, kind, payload;`
+
+	var jobID string
+	var kind string
+	var payload []byte
+
+	err := s.driver.QueryRow(ctx, acquireSQL, string(queueType)).Scan(&jobID, &kind, &payload)
+	if err == sql.ErrNoRows {
+		// No jobs available, wait for notification
+		notification, err := s.driver.WaitForNotification(ctx)
+		if err != nil {
+			return fmt.Errorf("notification error: %w", err)
+		}
+		// Process notification if needed
+		_ = notification
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to acquire job: %w", err)
+	}
+
+	// Find the worker implementation
+	worker, ok := s.Workers.GetWorker(kind)
+	if !ok {
+		return fmt.Errorf("no worker registered for job type: %s", kind)
+	}
+
+	// Unmarshal the payload
+	if err := json.Unmarshal(payload, worker); err != nil {
+		return fmt.Errorf("failed to unmarshal job payload: %w", err)
+	}
+
+	// Process the job
+	err = worker.(interface{ Process(context.Context) error }).Process(ctx)
+
+	// Update job status based on processing result
+	var updateSQL string
+	if err != nil {
+		updateSQL = `
+			UPDATE swig_jobs
+			SET status = CASE 
+					WHEN attempts >= max_attempts THEN 'failed'
+					ELSE 'pending'
+				END,
+				last_error = $2,
+				locked_by = NULL,
+				locked_at = NULL
+			WHERE id = $1`
+		if err := s.driver.Exec(ctx, updateSQL, jobID, err.Error()); err != nil {
+			return fmt.Errorf("failed to update failed job: %w", err)
+		}
+	} else {
+		updateSQL = `
+			UPDATE swig_jobs
+			SET status = 'completed',
+				locked_by = NULL,
+				locked_at = NULL
+			WHERE id = $1`
+		if err := s.driver.Exec(ctx, updateSQL, jobID); err != nil {
+			return fmt.Errorf("failed to update completed job: %w", err)
+		}
+	}
+
+	return nil
 }

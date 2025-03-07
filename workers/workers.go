@@ -51,3 +51,9 @@ func (wr *WorkerRegistry) RegisterWorker(worker interface{}) error {
 		return nil
 	}
 }
+
+// GetWorker retrieves a worker implementation by its job name
+func (wr *WorkerRegistry) GetWorker(jobName string) (interface{}, bool) {
+	worker, exists := wr.workers[jobName]
+	return worker, exists
+}

@@ -21,6 +21,7 @@ type Driver interface {
 	Notify(ctx context.Context, channel string, payload string) error
 	// New method to handle external transactions
 	AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error)
+	WaitForNotification(ctx context.Context) (*Notification, error)
 }
 
 // Transaction represents our internal transaction interface
@@ -53,4 +54,10 @@ type Rows interface {
 	Next() bool
 	Scan(dest ...interface{}) error
 	Close() error
+}
+
+// Notification represents a PostgreSQL notification
+type Notification struct {
+	Channel string
+	Payload string
 }
