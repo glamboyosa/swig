@@ -35,11 +35,11 @@ jobs:
         cache-dependency-path: swig-go/go.sum
 
     - name: Install dependencies
-      working-directory: ./swig-go
+      working-directory: .
       run: go mod download
 
     - name: Run tests
-      working-directory: ./swig-go
+      working-directory: .
       run: |
         go test -v -race ./...
       env:
