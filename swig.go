@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"swig/drivers"
-	"swig/workers"
+	"github.com/glamboyosa/swig/drivers"
+	"github.com/glamboyosa/swig/workers"
 )
 
 type QueueTypes string
