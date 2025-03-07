@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	 "github.com/glamboyosa/swig"
+	"github.com/glamboyosa/swig"
 	"github.com/glamboyosa/swig/drivers"
 	"github.com/glamboyosa/swig/workers"
 	_ "github.com/lib/pq"

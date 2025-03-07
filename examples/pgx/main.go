@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	 "github.com/glamboyosa/swig"
+	"github.com/glamboyosa/swig"
 	"github.com/glamboyosa/swig/drivers"
 	"github.com/glamboyosa/swig/workers"
 	"github.com/jackc/pgx/v5/pgxpool"
