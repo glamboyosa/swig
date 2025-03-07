@@ -31,16 +31,16 @@ func (w *EmailWorker) Process(ctx context.Context) error {
 
 func main() {
 	ctx := context.Background()
-
+	connectionString := "postgres://postgres:postgres@localhost:5432/swig_example?sslmode=disable"
 	// Connect to PostgreSQL using database/sql
-	db, err := sql.Open("postgres", "postgres://postgres:postgres@localhost:5432/swig_example?sslmode=disable")
+	db, err := sql.Open("postgres", connectionString)
 	if err != nil {
 		log.Fatalf("Unable to connect to database: %v", err)
 	}
 	defer db.Close()
 
 	// Create SQL driver
-	driver, err := drivers.NewSQLDriver(db)
+	driver, err := drivers.NewSQLDriver(db, connectionString)
 	if err != nil {
 		log.Fatalf("Unable to create driver: %v", err)
 	}
