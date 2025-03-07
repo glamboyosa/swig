@@ -7,7 +7,7 @@ Swig is a robust, PostgreSQL-backed job queue system for Go applications, design
 ⚠️ **Alpha Status**: Swig is currently in alpha and actively being developed towards v1.0.0. The API may undergo changes during this phase. For stability in production environments, we strongly recommend pinning to a specific version:
 
 ```bash
-go get github.com/glamboyosa/swig@v0.1.4-alpha
+go get github.com/glamboyosa/swig@v0.1.6-alpha
 ```
 import it like: 
 ```go 
