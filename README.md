@@ -7,7 +7,7 @@ Swig is a robust, PostgreSQL-backed job queue system for Go applications, design
 ⚠️ **Alpha Status**: Swig is currently in alpha and actively being developed towards v1.0.0. The API may undergo changes during this phase. For stability in production environments, we strongly recommend pinning to a specific version:
 
 ```bash
-go get github.com/glamboyosa/swig@v0.1.6-alpha
+go get github.com/glamboyosa/swig@v0.1.9-alpha
 ```
 import it like: 
 ```go 
@@ -235,6 +235,34 @@ Swig handles job processing with:
 - Job status management
 - Scheduled jobs
 - Priority queues
+
+## Cleanup and Testing
+
+Swig provides methods for both graceful shutdown and complete cleanup:
+
+```go
+// Graceful shutdown: Wait for jobs to complete
+err := swigClient.Stop(ctx)
+
+// Complete cleanup: Drop all Swig tables
+err := swigClient.Close(ctx)
+```
+
+The `Close` method is particularly useful in:
+- Testing environments to clean up after tests
+- Development scenarios to reset state
+- CI/CD pipelines needing clean slate between runs
+
+Example usage in tests:
+```go
+func TestJobProcessing(t *testing.T) {
+    // Setup Swig
+    swigClient := swig.NewSwig(driver, configs, workers)
+    defer swigClient.Close(ctx) // Clean up after test
+    
+    // Run your tests...
+}
+```
 
 ## Architecture
 
