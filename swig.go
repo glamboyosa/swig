@@ -627,3 +627,44 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 
 	return nil
 }
+
+// Close drops all Swig-related tables from the database. This is a destructive operation
+// that will permanently delete all jobs and leader election data. It's particularly useful
+// in testing environments or when completely removing Swig from your database.
+//
+// This method will:
+// 1. Drop the swig_jobs table (including all jobs, history, and triggers)
+// 2. Drop the swig_leader table (removing leader election state)
+//
+// Note: This is different from Stop() which gracefully shuts down workers.
+// Close() is for complete cleanup of database objects.
+//
+// Example:
+//
+//	// In a test environment
+//	swig := NewSwig(driver, configs, workers)
+//	defer swig.Close(ctx) // Clean up after tests
+//
+// Returns an error if the tables cannot be dropped or if the context is cancelled.
+func (s *Swig) Close(ctx context.Context) error {
+	// Drop the notify trigger first to avoid dependency issues
+	dropTriggerSQL := `
+		DROP TRIGGER IF EXISTS swig_jobs_notify_trigger ON swig_jobs;
+		DROP FUNCTION IF EXISTS notify_job_created();
+	`
+	if err := s.driver.Exec(ctx, dropTriggerSQL); err != nil {
+		return fmt.Errorf("failed to drop trigger and function: %w", err)
+	}
+
+	// Drop the tables
+	dropTablesSQL := `
+		DROP TABLE IF EXISTS swig_jobs;
+		DROP TABLE IF EXISTS swig_leader;
+	`
+	if err := s.driver.Exec(ctx, dropTablesSQL); err != nil {
+		return fmt.Errorf("failed to drop tables: %w", err)
+	}
+
+	log.Printf("Successfully dropped all Swig tables and triggers")
+	return nil
+}
