@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/glamboyosa/swig"
@@ -31,6 +34,20 @@ func (w *EmailWorker) Process(ctx context.Context) error {
 
 func main() {
 	ctx := context.Background()
+
+	// Create a context that will be cancelled on SIGINT or SIGTERM
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Printf("Received signal %v, initiating shutdown...", sig)
+		cancel()
+	}()
+
 	connectionString := "postgres://postgres:postgres@localhost:5432/swig_example?sslmode=disable"
 	// Connect to PostgreSQL using database/sql
 	db, err := sql.Open("postgres", connectionString)
@@ -58,6 +75,15 @@ func main() {
 	// Create and start Swig
 	swigClient := swig.NewSwig(driver, configs, *workers)
 	swigClient.Start(ctx)
+	defer func() {
+		// Create a new context for shutdown since the main one might be cancelled
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+
+		if err := swigClient.Stop(shutdownCtx); err != nil {
+			log.Printf("Error during shutdown: %v", err)
+		}
+	}()
 
 	// Add some example jobs
 	err = swigClient.AddJob(ctx, &EmailWorker{
@@ -94,6 +120,7 @@ func main() {
 		log.Printf("Failed to add scheduled job: %v", err)
 	}
 
-	// Keep the program running
-	select {}
+	// Wait for shutdown signal
+	<-ctx.Done()
+	log.Println("Shutting down gracefully...")
 }
