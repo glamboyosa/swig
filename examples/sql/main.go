@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/glamboyosa/swig"
@@ -31,6 +34,20 @@ func (w *EmailWorker) Process(ctx context.Context) error {
 
 func main() {
 	ctx := context.Background()
+
+	// Create a context that will be cancelled on SIGINT or SIGTERM
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Printf("Received signal %v, initiating shutdown...", sig)
+		cancel()
+	}()
+
 	connectionString := "postgres://postgres:postgres@localhost:5432/swig_example?sslmode=disable"
 	// Connect to PostgreSQL using database/sql
 	db, err := sql.Open("postgres", connectionString)
@@ -38,6 +55,18 @@ func main() {
 		log.Fatalf("Unable to connect to database: %v", err)
 	}
 	defer db.Close()
+
+	// Create users table for transaction examples
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS users (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		email TEXT NOT NULL UNIQUE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);`
+
+	if _, err := db.ExecContext(ctx, createTableSQL); err != nil {
+		log.Fatalf("Failed to create users table: %v", err)
+	}
 
 	// Create SQL driver
 	driver, err := drivers.NewSQLDriver(db, connectionString)
@@ -58,6 +87,86 @@ func main() {
 	// Create and start Swig
 	swigClient := swig.NewSwig(driver, configs, *workers)
 	swigClient.Start(ctx)
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+
+		if err := swigClient.Stop(shutdownCtx); err != nil {
+			log.Printf("Error during shutdown: %v", err)
+		}
+	}()
+
+	// Example 1: Using AddJobWithTx - Create user and send welcome email in same transaction
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback() // Will be no-op if committed
+
+	// Insert user
+	var userEmail = "new@example.com"
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (email) VALUES ($1)
+		ON CONFLICT (email) DO NOTHING
+	`, userEmail); err != nil {
+		log.Printf("Failed to insert user: %v", err)
+		return
+	}
+
+	// Add welcome email job in same transaction
+	err = swigClient.AddJobWithTx(ctx, tx, &EmailWorker{
+		To:      userEmail,
+		Subject: "Welcome to our platform!",
+		Body:    "Thanks for joining.",
+	})
+	if err != nil {
+		log.Printf("Failed to add welcome email job: %v", err)
+		return
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit transaction: %v", err)
+		return
+	}
+	log.Printf("Successfully created user and queued welcome email")
+
+	// Example 2: Using WithTx helper - Delete user and send goodbye email
+	err = driver.WithTx(ctx, func(tx drivers.Transaction) error {
+		// Delete user
+		if err := tx.Exec(ctx, `
+			DELETE FROM users WHERE email = $1
+		`, userEmail); err != nil {
+			return fmt.Errorf("failed to delete user: %w", err)
+		}
+
+		// Queue goodbye email
+		if err := tx.Exec(ctx, `
+			INSERT INTO swig_jobs (
+				kind, queue, payload, status
+			) VALUES (
+				'send_email',
+				'priority',
+				$1,
+				'pending'
+			)
+		`, map[string]string{
+			"to":      userEmail,
+			"subject": "Sorry to see you go!",
+			"body":    "We hope you'll come back soon.",
+		}); err != nil {
+			return fmt.Errorf("failed to queue goodbye email: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		log.Printf("Transaction failed: %v", err)
+	} else {
+		log.Printf("Successfully deleted user and queued goodbye email")
+	}
+
+	// Regular non-transactional job examples...
 
 	// Add some example jobs
 	err = swigClient.AddJob(ctx, &EmailWorker{
@@ -94,6 +203,7 @@ func main() {
 		log.Printf("Failed to add scheduled job: %v", err)
 	}
 
-	// Keep the program running
-	select {}
+	// Wait for shutdown signal
+	<-ctx.Done()
+	log.Println("Shutting down gracefully...")
 }
