@@ -94,6 +94,9 @@ func main() {
 		if err := swigClient.Stop(shutdownCtx); err != nil {
 			log.Printf("Error during shutdown: %v", err)
 		}
+		if err := swigClient.Close(shutdownCtx); err != nil {
+			log.Printf("Error closing swig client: %v", err)
+		}
 	}()
 
 	// Example 1: Using AddJobWithTx - Create user and send welcome email in same transaction

@@ -43,6 +43,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigChan
+
 		log.Printf("Received signal %v, initiating shutdown...", sig)
 		cancel()
 	}()
@@ -96,6 +97,9 @@ func main() {
 
 		if err := swigClient.Stop(shutdownCtx); err != nil {
 			log.Printf("Error during shutdown: %v", err)
+		}
+		if err := swigClient.Close(shutdownCtx); err != nil {
+			log.Printf("Error closing swig client: %v", err)
 		}
 	}()
 

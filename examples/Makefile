@@ -16,21 +16,37 @@ setup:
 
 # Start PostgreSQL in Docker
 db-up:
-	@echo "Starting PostgreSQL in Docker..."
-	@docker run --name $(CONTAINER_NAME) \
-		-e POSTGRES_DB=$(DB_NAME) \
-		-e POSTGRES_USER=$(DB_USER) \
-		-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-		-p $(DB_PORT):5432 \
-		-d postgres:15
-	@echo "Waiting for PostgreSQL to start..."
-	@sleep 3
+	@echo "Checking if PostgreSQL container exists..."
+	@if [ "$$(docker ps -a -q -f name=$(CONTAINER_NAME))" ]; then \
+		echo "Container $(CONTAINER_NAME) already exists"; \
+		if [ "$$(docker ps -q -f name=$(CONTAINER_NAME))" ]; then \
+			echo "Container is already running"; \
+		else \
+			echo "Starting existing container..."; \
+			docker start $(CONTAINER_NAME); \
+		fi; \
+	else \
+		echo "Creating new PostgreSQL container..."; \
+		docker run --name $(CONTAINER_NAME) \
+			-e POSTGRES_DB=$(DB_NAME) \
+			-e POSTGRES_USER=$(DB_USER) \
+			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
+			-p $(DB_PORT):5432 \
+			-d postgres:15; \
+		echo "Waiting for PostgreSQL to start..."; \
+		sleep 3; \
+	fi
 
 # Stop and remove PostgreSQL container
 db-down:
 	@echo "Stopping PostgreSQL..."
 	@docker stop $(CONTAINER_NAME) || true
 	@docker rm $(CONTAINER_NAME) || true
+
+# Stop PostgreSQL container without removing it
+db-stop:
+	@echo "Stopping PostgreSQL..."
+	@docker stop $(CONTAINER_NAME) || true
 
 # Show PostgreSQL logs
 db-logs:
@@ -56,8 +72,9 @@ run-sql: db-up
 help:
 	@echo "Available targets:"
 	@echo "  make setup       - Install/update dependencies"
-	@echo "  make db-up      - Start PostgreSQL in Docker"
-	@echo "  make db-down    - Stop PostgreSQL container"
+	@echo "  make db-up      - Start PostgreSQL in Docker (creates or starts existing)"
+	@echo "  make db-stop    - Stop PostgreSQL container without removing it"
+	@echo "  make db-down    - Stop and remove PostgreSQL container"
 	@echo "  make db-logs    - Show PostgreSQL logs"
 	@echo "  make show-tables - Show database tables"
 	@echo "  make run-pgx    - Run the PGX driver example"
