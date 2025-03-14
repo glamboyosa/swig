@@ -126,18 +126,33 @@ func (s *Swig) performLeaderDuties(ctx context.Context) {
 
 // retryFailedJobs finds failed jobs that can be retried and requeues them
 func (s *Swig) retryFailedJobs(ctx context.Context) error {
-	// Find failed jobs that haven't exceeded max attempts
+	// Find failed jobs that haven't exceeded max attempts and apply backoff
 	retrySQL := `
 		UPDATE swig_jobs
 		SET status = 'pending',
-			locked_by = NULL,
-			locked_at = NULL
+			instance_id = NULL,
+			worker_id = NULL,
+			locked_at = NULL,
+			scheduled_for = CASE 
+				-- Apply exponential backoff: 2^attempts seconds
+				WHEN attempts > 0 THEN NOW() + (interval '1 second' * pow(2, attempts))
+				ELSE NOW()
+			END
 		WHERE status = 'failed'
 			AND attempts < max_attempts
-			AND (locked_by IS NULL OR locked_at < NOW() - interval '5 minutes')
-		RETURNING id`
+			AND (
+				instance_id IS NULL 
+				OR locked_at < NOW() - interval '5 minutes'
+			)
+			-- Only retry jobs that have waited their backoff period
+			AND (
+				last_error IS NULL 
+				OR last_error_at < NOW() - (interval '1 second' * pow(2, attempts))
+			)
+		RETURNING id, attempts`
 
 	var jobIDs []string
+	var totalAttempts int
 	rows, err := s.driver.Query(ctx, retrySQL)
 	if err != nil {
 		return fmt.Errorf("failed to query failed jobs: %w", err)
@@ -146,14 +161,17 @@ func (s *Swig) retryFailedJobs(ctx context.Context) error {
 
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
+		var attempts int
+		if err := rows.Scan(&id, &attempts); err != nil {
 			return fmt.Errorf("failed to scan job ID: %w", err)
 		}
 		jobIDs = append(jobIDs, id)
+		totalAttempts += attempts
 	}
 
 	if len(jobIDs) > 0 {
-		log.Printf("Requeued %d failed jobs for retry", len(jobIDs))
+		log.Printf("Requeued %d failed jobs for retry (avg attempts: %.1f)",
+			len(jobIDs), float64(totalAttempts)/float64(len(jobIDs)))
 	}
 
 	return nil
@@ -177,6 +195,7 @@ func (s *Swig) Start(ctx context.Context) {
 		worker_id UUID,             -- ID of the specific worker
 		locked_at TIMESTAMPTZ,
 		last_error TEXT,
+		last_error_at TIMESTAMPTZ,  -- When the last error occurred
 		
 		CONSTRAINT valid_status CHECK (status IN (
 			'pending', 'processing', 'completed', 'failed', 'scheduled'
@@ -576,7 +595,7 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 		}
 		// Process notification if needed
 		_ = notification
-		return nil
+		return nil // Return nil here since this is normal behavior
 	}
 	if err != nil {
 		return fmt.Errorf("failed to acquire job: %w", err)
@@ -605,6 +624,7 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 					ELSE 'pending'
 				END,
 				last_error = $2,
+				last_error_at = NOW(),
 				instance_id = NULL,
 				worker_id = NULL,
 				locked_at = NULL
