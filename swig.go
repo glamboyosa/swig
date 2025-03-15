@@ -587,7 +587,9 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	var payload []byte
 
 	err := s.driver.QueryRow(ctx, acquireSQL, string(queueType), s.workerID, workerID).Scan(&jobID, &kind, &payload)
-	if err == sql.ErrNoRows {
+
+	// Check for "no rows" errors from both database/sql and pgx
+	if err == sql.ErrNoRows || err != nil && (err.Error() == "no rows in result set" || err.Error() == "no rows in result") {
 		// No jobs available, wait for notification
 		notification, err := s.driver.WaitForNotification(ctx)
 		if err != nil {
