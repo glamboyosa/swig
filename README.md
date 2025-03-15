@@ -226,7 +226,26 @@ Each queue operates independently with its own worker pool, allowing you to:
 - Process priority jobs faster with dedicated workers
 - Prevent low-priority jobs from blocking important tasks
 - Scale worker pools based on queue requirements
+## Worker Registration
 
+Workers must be registered with Swig before they can process jobs:
+
+```go
+// Create workers registry
+workers := swig.NewWorkerRegistry()
+
+// Register workers
+workers.RegisterWorker(&EmailWorker{})
+workers.RegisterWorker(&ImageResizeWorker{})
+
+// Pass workers to Swig
+swigClient := swig.NewSwig(driver, configs, workers)
+```
+
+The registry ensures that:
+- Only registered worker types can be processed
+- Worker implementations are validated at startup
+- Job payloads can be properly deserialized 
 ## Job Processing
 
 Swig handles job processing with:
@@ -281,23 +300,3 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Worker Registration
-
-Workers must be registered with Swig before they can process jobs:
-
-```go
-// Create workers registry
-workers := swig.NewWorkerRegistry()
-
-// Register workers
-workers.RegisterWorker(&EmailWorker{})
-workers.RegisterWorker(&ImageResizeWorker{})
-
-// Pass workers to Swig
-swigClient := swig.NewSwig(driver, configs, workers)
-```
-
-The registry ensures that:
-- Only registered worker types can be processed
-- Worker implementations are validated at startup
-- Job payloads can be properly deserialized 
