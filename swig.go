@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -155,6 +156,10 @@ func (s *Swig) retryFailedJobs(ctx context.Context) error {
 	var totalAttempts int
 	rows, err := s.driver.Query(ctx, retrySQL)
 	if err != nil {
+		// Don't report context cancellation as an error - this is normal during shutdown
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		return fmt.Errorf("failed to query failed jobs: %w", err)
 	}
 	defer rows.Close()
@@ -673,6 +678,10 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	// If no job was available, wait for notification
 	notification, err := s.driver.WaitForNotification(ctx)
 	if err != nil {
+		// Don't report context cancellation as an error - this is normal during shutdown
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		return fmt.Errorf("notification error: %w", err)
 	}
 
