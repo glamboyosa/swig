@@ -3,7 +3,7 @@ module github.com/glamboyosa/swig/examples
 go 1.23.2
 
 require (
-	github.com/glamboyosa/swig v0.1.11-alpha
+	github.com/glamboyosa/swig v0.1.12-alpha
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/lib/pq v1.10.9
 )

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -143,6 +144,19 @@ func main() {
 			return fmt.Errorf("failed to delete user: %w", err)
 		}
 
+		// Create a proper EmailWorker instead of using a map
+		goodbyeEmail := &EmailWorker{
+			To:      userEmail,
+			Subject: "Sorry to see you go!",
+			Body:    "We hope you'll come back soon.",
+		}
+
+		// Serialize to JSON
+		emailJSON, err := json.Marshal(goodbyeEmail)
+		if err != nil {
+			return fmt.Errorf("failed to marshal email: %w", err)
+		}
+
 		// Queue goodbye email
 		if err := tx.Exec(ctx, `
 			INSERT INTO swig_jobs (
@@ -153,11 +167,7 @@ func main() {
 				$1,
 				'pending'
 			)
-		`, map[string]string{
-			"to":      userEmail,
-			"subject": "Sorry to see you go!",
-			"body":    "We hope you'll come back soon.",
-		}); err != nil {
+		`, emailJSON); err != nil {
 			return fmt.Errorf("failed to queue goodbye email: %w", err)
 		}
 
