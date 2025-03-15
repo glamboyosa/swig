@@ -547,101 +547,144 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	// Generate unique worker ID for this job acquisition
 	workerID := pkg.GenerateWorkerID()
 
-	acquireSQL := `
-		UPDATE swig_jobs
-		SET status = 'processing',
-			instance_id = $2,        -- Track Swig instance
-			worker_id = $3,          -- Track specific worker
-			locked_at = NOW(),
-			attempts = attempts + 1
-		WHERE id = (
-			SELECT id
-			FROM swig_jobs
-			WHERE status = 'pending'
-				AND scheduled_for <= NOW()
-				AND (
-					(queue = 'priority' AND EXISTS (
-						SELECT 1 FROM swig_jobs 
-						WHERE queue = 'priority' 
-						AND status = 'pending'
+	// Check for "no rows" errors from both database/sql and pgx
+	acquireAndProcessJob := func(ctx context.Context, queueType QueueTypes, specificJobID string) error {
+		var acquireSQL string
+		var args []interface{}
+
+		if specificJobID != "" {
+			// Try to acquire a specific job first (from notification)
+			acquireSQL = `
+				UPDATE swig_jobs
+				SET status = 'processing',
+					instance_id = $1,
+					worker_id = $2,
+					locked_at = NOW(),
+					attempts = attempts + 1
+				WHERE id = $3
+					AND status = 'pending'
+					AND scheduled_for <= NOW()
+				RETURNING id, kind, payload;`
+			args = []interface{}{s.workerID, workerID, specificJobID}
+		} else {
+			// Otherwise try to acquire any job with priority handling
+			acquireSQL = `
+				UPDATE swig_jobs
+				SET status = 'processing',
+					instance_id = $1,
+					worker_id = $2,
+					locked_at = NOW(),
+					attempts = attempts + 1
+				WHERE id = (
+					SELECT id
+					FROM swig_jobs
+					WHERE status = 'pending'
 						AND scheduled_for <= NOW()
-					))
-					OR (queue = $1 AND NOT EXISTS (
-						SELECT 1 FROM swig_jobs 
-						WHERE queue = 'priority' 
-						AND status = 'pending'
-						AND scheduled_for <= NOW()
-					))
+						AND (
+							(queue = 'priority' AND EXISTS (
+								SELECT 1 FROM swig_jobs 
+								WHERE queue = 'priority' 
+								AND status = 'pending'
+								AND scheduled_for <= NOW()
+							))
+							OR (queue = $3 AND NOT EXISTS (
+								SELECT 1 FROM swig_jobs 
+								WHERE queue = 'priority' 
+								AND status = 'pending'
+								AND scheduled_for <= NOW()
+							))
+						)
+					ORDER BY 
+						queue = 'priority' DESC,
+						priority DESC,
+						created_at
+					FOR UPDATE SKIP LOCKED
+					LIMIT 1
 				)
-			ORDER BY 
-				queue = 'priority' DESC,
-				priority DESC,
-				created_at
-			FOR UPDATE SKIP LOCKED
-			LIMIT 1
-		)
-		RETURNING id, kind, payload;`
+				RETURNING id, kind, payload;`
+			args = []interface{}{s.workerID, workerID, string(queueType)}
+		}
 
-	var jobID string
-	var kind string
-	var payload []byte
+		var jobID string
+		var kind string
+		var payload []byte
 
-	err := s.driver.QueryRow(ctx, acquireSQL, string(queueType), s.workerID, workerID).Scan(&jobID, &kind, &payload)
-	if err == sql.ErrNoRows {
-		// No jobs available, wait for notification
-		notification, err := s.driver.WaitForNotification(ctx)
+		err := s.driver.QueryRow(ctx, acquireSQL, args...).Scan(&jobID, &kind, &payload)
+		if err == sql.ErrNoRows || err != nil && (err.Error() == "no rows in result set" || err.Error() == "no rows in result") {
+			return nil // No job available
+		}
 		if err != nil {
-			return fmt.Errorf("notification error: %w", err)
+			return fmt.Errorf("failed to acquire job: %w", err)
 		}
-		// Process notification if needed
-		_ = notification
-		return nil // Return nil here since this is normal behavior
-	}
-	if err != nil {
-		return fmt.Errorf("failed to acquire job: %w", err)
-	}
 
-	// Find the worker implementation
-	worker, ok := s.Workers.GetWorker(kind)
-	if !ok {
-		return fmt.Errorf("no worker registered for job type: %s", kind)
-	}
-
-	// Unmarshal the payload
-	if err := json.Unmarshal(payload, worker); err != nil {
-		return fmt.Errorf("failed to unmarshal job payload: %w", err)
-	}
-
-	// Process the job
-	err = worker.(interface{ Process(context.Context) error }).Process(ctx)
-
-	// Update job status based on processing result
-	if err != nil {
-		updateSQL := `
-			UPDATE swig_jobs
-			SET status = CASE 
-					WHEN attempts >= max_attempts THEN 'failed'
-					ELSE 'pending'
-				END,
-				last_error = $2,
-				last_error_at = NOW(),
-				instance_id = NULL,
-				worker_id = NULL,
-				locked_at = NULL
-			WHERE id = $1`
-		if err := s.driver.Exec(ctx, updateSQL, jobID, err.Error()); err != nil {
-			return fmt.Errorf("failed to update failed job: %w", err)
+		// Find the worker implementation
+		worker, ok := s.Workers.GetWorker(kind)
+		if !ok {
+			return fmt.Errorf("no worker registered for job type: %s", kind)
 		}
-	} else {
-		updateSQL := `
-			UPDATE swig_jobs
-			SET status = 'completed',
-				instance_id = NULL,
-				worker_id = NULL,
-				locked_at = NULL
-			WHERE id = $1`
-		if err := s.driver.Exec(ctx, updateSQL, jobID); err != nil {
-			return fmt.Errorf("failed to update completed job: %w", err)
+
+		// Unmarshal the payload
+		if err := json.Unmarshal(payload, worker); err != nil {
+			return fmt.Errorf("failed to unmarshal job payload: %w", err)
+		}
+
+		// Process the job
+		err = worker.(interface{ Process(context.Context) error }).Process(ctx)
+
+		// Update job status based on processing result
+		if err != nil {
+			updateSQL := `
+				UPDATE swig_jobs
+				SET status = CASE 
+						WHEN attempts >= max_attempts THEN 'failed'
+						ELSE 'pending'
+					END,
+					last_error = $2,
+					last_error_at = NOW(),
+					instance_id = NULL,
+					worker_id = NULL,
+					locked_at = NULL
+				WHERE id = $1`
+			if err := s.driver.Exec(ctx, updateSQL, jobID, err.Error()); err != nil {
+				return fmt.Errorf("failed to update failed job: %w", err)
+			}
+		} else {
+			updateSQL := `
+				UPDATE swig_jobs
+				SET status = 'completed',
+					instance_id = NULL,
+					worker_id = NULL,
+					locked_at = NULL
+				WHERE id = $1`
+			if err := s.driver.Exec(ctx, updateSQL, jobID); err != nil {
+				return fmt.Errorf("failed to update completed job: %w", err)
+			}
+		}
+
+		return nil
+	}
+
+	// First try to acquire and process any job
+	err := acquireAndProcessJob(ctx, queueType, "")
+	if err != nil {
+		return err
+	}
+
+	// If no job was available, wait for notification
+	notification, err := s.driver.WaitForNotification(ctx)
+	if err != nil {
+		return fmt.Errorf("notification error: %w", err)
+	}
+
+	// Process the notification if we received one
+	if notification != nil && notification.Payload != "" {
+		// Try to parse the notification payload (should be JSON with job ID)
+		var notificationData struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(notification.Payload), &notificationData); err == nil && notificationData.ID != "" {
+			// Try to acquire and process the specific job from the notification
+			return acquireAndProcessJob(ctx, queueType, notificationData.ID)
 		}
 	}
 
