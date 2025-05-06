@@ -32,7 +32,7 @@ db-up:
 			-e POSTGRES_USER=$(DB_USER) \
 			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
 			-p $(DB_PORT):5432 \
-			-d postgres:15; \
+			-d postgres:16; \
 		echo "Waiting for PostgreSQL to start..."; \
 		sleep 3; \
 	fi
@@ -58,8 +58,22 @@ show-tables:
 	@docker exec $(CONTAINER_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "\dt"
 	@docker exec $(CONTAINER_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "SELECT * FROM swig_jobs;"
 
+# Create database if it doesn't exist (relies on POSTGRES_DB in db-up, then waits for availability)
+create-db:
+	@echo "Ensuring PostgreSQL server is ready for user $(DB_USER)..."
+	@until docker exec $(CONTAINER_NAME) pg_isready -U $(DB_USER) -q; do \
+		echo "Waiting for PostgreSQL server to accept connections for user $(DB_USER)..."; \
+		sleep 1; \
+	done
+	@echo "Waiting for database '$(DB_NAME)' (expected to be created by POSTGRES_DB='$(DB_NAME)' on container startup) to become fully available..."
+	@until docker exec $(CONTAINER_NAME) psql -U $(DB_USER) -d $(DB_NAME) -c "" >/dev/null 2>&1; do \
+		echo "Still waiting for database '$(DB_NAME)'..."; \
+		sleep 1; \
+	done
+	@echo "Database '$(DB_NAME)' is now available."
+
 # Run the pgx example
-run-pgx: db-up
+run-pgx: db-up create-db
 	@echo "Running PGX example..."
 	cd pgx && go run main.go
 

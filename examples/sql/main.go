@@ -217,19 +217,19 @@ func main() {
 	}
 
 	// Example: Batch job insertion
-	/*
+	
 		batchJobs := []drivers.BatchJob{
 			{
 				Worker: &EmailWorker{To: "batch1@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
-				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
+				Opts:   drivers.JobOptions{Queue: "default", Priority: 1, RunAt: time.Now()},
 			},
 			{
 				Worker: &EmailWorker{To: "batch2@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
-				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
+				Opts:   drivers.JobOptions{Queue: "default", Priority: 1, RunAt: time.Now()},
 			},
 			{
 				Worker: &EmailWorker{To: "batch3@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
-				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
+				Opts:   drivers.JobOptions{Queue: "default", Priority: 1, RunAt: time.Now()},
 			},
 		}
 
@@ -251,11 +251,11 @@ func main() {
 		txBatchJobs := []drivers.BatchJob{
 			{
 				Worker: &EmailWorker{To: "tx1@example.com", Subject: "Transactional Welcome", Body: "Welcome to our platform!"},
-				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
+				Opts:   drivers.JobOptions{Queue: "default", Priority: 1, RunAt: time.Now()},
 			},
 			{
 				Worker: &EmailWorker{To: "tx2@example.com", Subject: "Transactional Welcome", Body: "Welcome to our platform!"},
-				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
+				Opts:   drivers.JobOptions{Queue: "default", Priority: 1, RunAt: time.Now()},
 			},
 		}
 
@@ -270,7 +270,7 @@ func main() {
 			return
 		}
 		log.Println("Transactional batch jobs added successfully")
-	*/
+	
 
 	// Wait for shutdown signal
 	<-ctx.Done()
