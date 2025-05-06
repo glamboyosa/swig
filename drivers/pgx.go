@@ -2,8 +2,10 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -142,4 +144,62 @@ func (d *PgxDriver) WaitForNotification(ctx context.Context) (*Notification, err
 		Channel: pgxNotification.Channel,
 		Payload: pgxNotification.Payload,
 	}, nil
+}
+
+// AddJobsWithTx adds multiple jobs as part of an existing transaction
+func (d *PgxDriver) AddJobsWithTx(ctx context.Context, tx interface{}, jobs []BatchJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	// Get transaction adapter from driver
+	txAdapter, err := d.AddJobWithTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("invalid transaction for driver: %w", err)
+	}
+
+	// Build the values clause and args
+	var values []string
+	var args []interface{}
+	argCount := 1
+
+	for _, job := range jobs {
+		// Type assert to check if it implements Worker interface
+		if _, ok := job.Worker.(interface{ JobName() string }); !ok {
+			return fmt.Errorf("worker must implement JobName() string")
+		}
+
+		// Serialize the worker
+		argsJSON, err := json.Marshal(job.Worker)
+		if err != nil {
+			return fmt.Errorf("failed to serialize job args: %w", err)
+		}
+
+		// Add values for this job
+		values = append(values, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, 'pending')",
+			argCount, argCount+1, argCount+2, argCount+3, argCount+4))
+
+		args = append(args,
+			job.Worker.(interface{ JobName() string }).JobName(),
+			string(job.Opts.Queue),
+			argsJSON,
+			job.Opts.Priority,
+			job.Opts.RunAt,
+		)
+		argCount += 5
+	}
+
+	// Build and execute the insert query
+	insertSQL := fmt.Sprintf(`
+		INSERT INTO swig_jobs (
+			kind,
+			queue,
+			payload,
+			priority,
+			scheduled_for,
+			status
+		) VALUES %s
+	`, strings.Join(values, ","))
+
+	return txAdapter.Exec(ctx, insertSQL, args...)
 }

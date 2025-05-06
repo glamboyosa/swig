@@ -210,6 +210,58 @@ func main() {
 		log.Printf("Failed to add scheduled job: %v", err)
 	}
 
+	/*
+		// Example: Batch job insertion
+		batchJobs := []drivers.BatchJob{
+			{
+				Worker: &EmailWorker{To: "batch1@example.com", Subject: "Batch Welcome"},
+				Opts:   drivers.JobOptions{Queue: "default"},
+			},
+			{
+				Worker: &EmailWorker{To: "batch2@example.com", Subject: "Batch Welcome"},
+				Opts:   drivers.JobOptions{Queue: "default"},
+			},
+			{
+				Worker: &EmailWorker{To: "batch3@example.com", Subject: "Batch Welcome"},
+				Opts:   drivers.JobOptions{Queue: "default"},
+			},
+		}
+
+		log.Println("Adding batch jobs...")
+		if err := swig.AddJobs(ctx, batchJobs); err != nil {
+			log.Fatalf("Failed to add batch jobs: %v", err)
+		}
+		log.Println("Batch jobs added successfully")
+
+		// Example: Transactional batch insertion
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			log.Fatalf("Failed to begin transaction: %v", err)
+		}
+		defer tx.Rollback(ctx)
+
+		txBatchJobs := []drivers.BatchJob{
+			{
+				Worker: &EmailWorker{To: "tx1@example.com", Subject: "Transactional Welcome"},
+				Opts:   drivers.JobOptions{Queue: "default"},
+			},
+			{
+				Worker: &EmailWorker{To: "tx2@example.com", Subject: "Transactional Welcome"},
+				Opts:   drivers.JobOptions{Queue: "default"},
+			},
+		}
+
+		log.Println("Adding transactional batch jobs...")
+		if err := swig.AddJobsWithTx(ctx, tx, txBatchJobs); err != nil {
+			log.Fatalf("Failed to add transactional batch jobs: %v", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			log.Fatalf("Failed to commit transaction: %v", err)
+		}
+		log.Println("Transactional batch jobs added successfully")
+	*/
+
 	// Wait for shutdown signal
 	<-ctx.Done()
 	log.Println("Shutting down gracefully...")

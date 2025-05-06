@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -22,6 +23,7 @@ type Driver interface {
 	// New method to handle external transactions
 	AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error)
 	WaitForNotification(ctx context.Context) (*Notification, error)
+	AddJobsWithTx(ctx context.Context, tx interface{}, jobs []BatchJob) error
 }
 
 // Transaction represents our internal transaction interface
@@ -60,4 +62,17 @@ type Rows interface {
 type Notification struct {
 	Channel string
 	Payload string
+}
+
+// BatchJob represents a job to be inserted in a batch operation
+type BatchJob struct {
+	Worker interface{}
+	Opts   JobOptions
+}
+
+// JobOptions represents options for a job
+type JobOptions struct {
+	Queue    string
+	Priority int
+	RunAt    time.Time
 }
