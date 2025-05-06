@@ -1,0 +1,164 @@
+---
+title: API Reference
+description: Detailed API documentation for Swig
+---
+
+# API Reference
+
+## Core Types
+
+### Swig
+
+The main type that manages job processing.
+
+```go
+type Swig struct {
+    driver          Driver
+    swigQueueConfig []SwigQueueConfig
+    Workers         WorkerRegistry
+    // ... internal fields
+}
+```
+
+### SwigQueueConfig
+
+Configuration for a queue type.
+
+```go
+type SwigQueueConfig struct {
+    QueueType  QueueTypes
+    MaxWorkers int
+}
+```
+
+### JobOptions
+
+Options for job processing.
+
+```go
+type JobOptions struct {
+    Queue    QueueTypes
+    Priority int
+    RunAt    time.Time
+}
+```
+
+### BatchJob
+
+A job to be processed in a batch.
+
+```go
+type BatchJob struct {
+    Worker Worker
+    Opts   JobOptions
+}
+```
+
+## Core Functions
+
+### NewSwig
+
+Creates a new Swig instance.
+
+```go
+func NewSwig(driver Driver, configs []SwigQueueConfig, workers WorkerRegistry) *Swig
+```
+
+### Start
+
+Starts processing jobs.
+
+```go
+func (s *Swig) Start(ctx context.Context)
+```
+
+### Stop
+
+Stops processing jobs.
+
+```go
+func (s *Swig) Stop(ctx context.Context) error
+```
+
+### AddJob
+
+Adds a single job.
+
+```go
+func (s *Swig) AddJob(ctx context.Context, worker Worker, opts ...JobOptions) error
+```
+
+### AddJobs
+
+Adds multiple jobs in a single operation.
+
+```go
+func (s *Swig) AddJobs(ctx context.Context, jobs []BatchJob) error
+```
+
+### AddJobWithTx
+
+Adds a job within a transaction.
+
+```go
+func (s *Swig) AddJobWithTx(ctx context.Context, tx interface{}, worker Worker, opts ...JobOptions) error
+```
+
+### AddJobsWithTx
+
+Adds multiple jobs within a transaction.
+
+```go
+func (s *Swig) AddJobsWithTx(ctx context.Context, tx interface{}, jobs []BatchJob) error
+```
+
+### WithTx
+
+Executes a function within a transaction.
+
+```go
+func (s *Swig) WithTx(ctx context.Context, fn func(tx interface{}) error) error
+```
+
+## Driver Interface
+
+The `Driver` interface defines the contract for database operations:
+
+```go
+type Driver interface {
+    WithTx(ctx context.Context, fn func(tx Transaction) error) error
+    Exec(ctx context.Context, sql string, args ...interface{}) error
+    Query(ctx context.Context, sql string, args ...interface{}) (Rows, error)
+    QueryRow(ctx context.Context, sql string, args ...interface{}) Row
+    Listen(ctx context.Context, channel string) error
+    Notify(ctx context.Context, channel string, payload string) error
+    AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error)
+    WaitForNotification(ctx context.Context) (*Notification, error)
+    AddJobsWithTx(ctx context.Context, tx interface{}, jobs []BatchJob) error
+}
+```
+
+## Worker Interface
+
+The `Worker` interface defines the contract for job processing:
+
+```go
+type Worker interface {
+    JobName() string
+    Process(ctx context.Context) error
+}
+```
+
+## Constants
+
+```go
+const (
+    Default  QueueTypes = "default"
+    Priority QueueTypes = "priority"
+)
+```
+
+## Next Steps
+
+- [Examples](/docs/examples) - See Swig in action with practical examples
+- [Configuration](/docs/configuration) - Learn how to configure Swig for your needs 
