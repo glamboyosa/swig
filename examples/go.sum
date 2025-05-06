@@ -15,6 +15,8 @@ github.com/glamboyosa/swig v0.1.12-alpha h1:OEG7os4W73wp45RUdhVnoI+8NWnhSF7IV3Qu
 github.com/glamboyosa/swig v0.1.12-alpha/go.mod h1:PmSNGpVi+f7WIzPv1d+CndtI8KJfyDo1K10JvDQ6yI8=
 github.com/glamboyosa/swig v0.1.13-alpha h1:aweXgJOkIsNcRugf1I8ag1FQV6m8D7VYPhVh7ToIvPc=
 github.com/glamboyosa/swig v0.1.13-alpha/go.mod h1:PmSNGpVi+f7WIzPv1d+CndtI8KJfyDo1K10JvDQ6yI8=
+github.com/glamboyosa/swig v0.1.14-alpha h1:iEfIrGsWzpH3tQWauZ0GkzeYlXN3OX2tJQXSZXGS5LA=
+github.com/glamboyosa/swig v0.1.14-alpha/go.mod h1:PmSNGpVi+f7WIzPv1d+CndtI8KJfyDo1K10JvDQ6yI8=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
