@@ -7,7 +7,7 @@ Swig is a robust, PostgreSQL-backed job queue system for Go applications, design
 ⚠️ **Alpha Status**: Swig is currently in alpha and actively being developed towards v1.0.0. The API may undergo changes during this phase. For stability in production environments, we strongly recommend pinning to a specific version:
 
 ```bash
-go get github.com/glamboyosa/swig@v0.1.13-alpha
+go get github.com/glamboyosa/swig@v0.1.14-alpha
 ```
 import it like: 
 ```go 
@@ -299,4 +299,150 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Batch Job Insertion
+
+Swig supports efficient batch insertion of multiple jobs in a single database operation. This is particularly useful for:
+
+- Bulk operations (e.g., data migrations)
+- Atomic insertion of related jobs
+- High-throughput scenarios
+- Reducing database round trips
+
+### Basic Usage
+
+```go
+// Create a slice of jobs to insert
+jobs := []swig.BatchJob{
+    {
+        Worker: &EmailWorker{To: "user1@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.QueueTypes("default")},
+    },
+    {
+        Worker: &EmailWorker{To: "user2@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.QueueTypes("default")},
+    },
+}
+
+// Insert all jobs in a single operation
+err := swig.AddJobs(ctx, jobs)
+if err != nil {
+    log.Fatalf("Failed to add jobs: %v", err)
+}
+```
+
+### Transactional Batch Insertion
+
+Batch jobs can also be inserted as part of a transaction:
+
+```go
+// Start a transaction
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    log.Fatalf("Failed to begin transaction: %v", err)
+}
+defer tx.Rollback()
+
+// Create and insert jobs
+jobs := []swig.BatchJob{
+    {
+        Worker: &EmailWorker{To: "user1@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.QueueTypes("default")},
+    },
+    {
+        Worker: &EmailWorker{To: "user2@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.QueueTypes("default")},
+    },
+}
+
+// Insert all jobs in the transaction
+err = swig.AddJobsWithTx(ctx, tx, jobs)
+if err != nil {
+    log.Fatalf("Failed to add jobs: %v", err)
+}
+
+// Commit the transaction
+if err := tx.Commit(); err != nil {
+    log.Fatalf("Failed to commit transaction: %v", err)
+}
+```
+
+### Performance Considerations
+
+- Batch insertion is significantly faster than individual inserts for large numbers of jobs
+- The optimal batch size depends on your database configuration and network conditions
+- Consider using transactions for atomic operations
+- Monitor memory usage when dealing with very large batches
+
+## Batch Job Processing
+
+Swig supports efficient batch job processing through two methods:
+
+1. **Non-transactional Batch Insertion**:
+```go
+batchJobs := []drivers.BatchJob{
+    {
+        Worker: &EmailWorker{To: "user1@example.com", Subject: "Welcome"},
+        Opts:   drivers.JobOptions{Queue: "default"},
+    },
+    {
+        Worker: &EmailWorker{To: "user2@example.com", Subject: "Welcome"},
+        Opts:   drivers.JobOptions{Queue: "default"},
+    },
+}
+
+if err := swig.AddJobs(ctx, batchJobs); err != nil {
+    log.Fatalf("Failed to add batch jobs: %v", err)
+}
+```
+
+2. **Transactional Batch Insertion**:
+```go
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    log.Fatalf("Failed to begin transaction: %v", err)
+}
+defer tx.Rollback()
+
+if err := swig.AddJobsWithTx(ctx, tx, batchJobs); err != nil {
+    log.Fatalf("Failed to add batch jobs: %v", err)
+}
+
+if err := tx.Commit(); err != nil {
+    log.Fatalf("Failed to commit transaction: %v", err)
+}
+```
+
+### Implementation Details
+
+Swig supports two PostgreSQL drivers with different implementations:
+
+1. **database/sql Driver**:
+   - Uses standard Go database/sql interface
+   - Implements batch insertion using a single SQL query with multiple VALUES clauses
+   - Example SQL:
+     ```sql
+     INSERT INTO swig_jobs (kind, queue, payload, status)
+     VALUES 
+         ('send_email', 'default', '{"to":"user1@example.com"}', 'pending'),
+         ('send_email', 'default', '{"to":"user2@example.com"}', 'pending')
+     ```
+
+2. **pgx Driver**:
+   - Uses jackc/pgx for better performance
+   - Implements batch insertion using pgx's batch processing capabilities
+   - Example SQL:
+     ```sql
+     INSERT INTO swig_jobs (kind, queue, payload, status)
+     VALUES ($1, $2, $3, 'pending')
+     ```
+   - Uses pgx's batch processing to execute multiple inserts efficiently
+
+Both implementations provide the same functionality but with different performance characteristics:
+- database/sql: Simpler implementation, good for most use cases
+- pgx: Better performance for high-throughput scenarios, especially with batch operations
+
+The choice between drivers depends on your specific needs:
+- Use database/sql for simplicity and standard Go database access
+- Use pgx for better performance and advanced PostgreSQL features
 

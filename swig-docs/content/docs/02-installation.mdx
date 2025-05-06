@@ -1,0 +1,94 @@
+---
+title: Installation
+description: How to install and set up Swig
+---
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+# Installation
+
+## Prerequisites
+
+- Go 1.23 or later
+- PostgreSQL 15 or later
+
+## Installation
+
+```bash
+go get github.com/glamboyosa/swig
+```
+
+## Database Setup
+
+### 1. Create the Jobs Table
+
+Run the following SQL migration to create the required table:
+
+```sql
+CREATE TABLE IF NOT EXISTS swig_jobs (
+    id BIGSERIAL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 0,
+    run_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_swig_jobs_status ON swig_jobs (status);
+CREATE INDEX IF NOT EXISTS idx_swig_jobs_queue ON swig_jobs (queue);
+CREATE INDEX IF NOT EXISTS idx_swig_jobs_run_at ON swig_jobs (run_at);
+```
+
+### 2. Choose Your Driver
+
+Swig supports two PostgreSQL driver implementations:
+
+<Tabs items={['pgx (Recommended)', 'database/sql']}>
+<Tab value="pgx (Recommended)">
+
+```go
+import (
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/glamboyosa/swig/drivers"
+)
+
+// Setup pgx connection
+pgxConfig, _ := pgxpool.ParseConfig("postgres://localhost:5432/myapp")
+pgxPool, _ := pgxpool.NewWithConfig(ctx, pgxConfig)
+driver, _ := drivers.NewPgxDriver(pgxPool)
+```
+
+Benefits:
+- Better performance
+- Native LISTEN/NOTIFY support
+- Real-time job notifications
+</Tab>
+
+<Tab value="database/sql">
+
+```go
+import (
+    "database/sql"
+    _ "github.com/lib/pq"
+    "github.com/glamboyosa/swig/drivers"
+)
+
+// Setup database/sql connection
+db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
+driver, _ := drivers.NewSQLDriver(db, "postgres://localhost:5432/myapp")
+```
+
+Important Notes:
+- Requires `github.com/lib/pq` driver for LISTEN/NOTIFY support
+- Must import with: `import _ "github.com/lib/pq"`
+- Must use `postgres://` (not `postgresql://`) in connection strings
+</Tab>
+</Tabs>
+
+## Next Steps
+
+- [Configuration](/docs/configuration) - Learn how to configure Swig for your needs
+- [Examples](/docs/examples) - See practical examples of using Swig
+- [API Reference](/docs/api) - Detailed API documentation 

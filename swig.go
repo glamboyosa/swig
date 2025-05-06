@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -739,4 +740,70 @@ func (s *Swig) Close(ctx context.Context) error {
 
 	log.Printf("Successfully dropped all Swig tables and triggers")
 	return nil
+}
+
+// BatchJob represents a job to be inserted in a batch operation
+type BatchJob struct {
+	Worker interface{}
+	Opts   JobOptions
+}
+
+// AddJobs adds multiple jobs in a single database operation
+func (s *Swig) AddJobs(ctx context.Context, jobs []drivers.BatchJob) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	// Start a transaction for atomic batch insertion
+	return s.driver.WithTx(ctx, func(tx drivers.Transaction) error {
+		// Build the values clause and args
+		var values []string
+		var args []interface{}
+		argCount := 1
+
+		for _, job := range jobs {
+			// Type assert to check if it implements Worker interface
+			if _, ok := job.Worker.(interface{ JobName() string }); !ok {
+				return fmt.Errorf("worker must implement JobName() string")
+			}
+
+			// Serialize the worker
+			argsJSON, err := json.Marshal(job.Worker)
+			if err != nil {
+				return fmt.Errorf("failed to serialize job args: %w", err)
+			}
+
+			// Add values for this job
+			values = append(values, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, 'pending')",
+				argCount, argCount+1, argCount+2, argCount+3, argCount+4))
+
+			args = append(args,
+				job.Worker.(interface{ JobName() string }).JobName(),
+				string(job.Opts.Queue),
+				argsJSON,
+				job.Opts.Priority,
+				job.Opts.RunAt,
+			)
+			argCount += 5
+		}
+
+		// Build and execute the insert query
+		insertSQL := fmt.Sprintf(`
+			INSERT INTO swig_jobs (
+				kind,
+				queue,
+				payload,
+				priority,
+				scheduled_for,
+				status
+			) VALUES %s
+		`, strings.Join(values, ","))
+
+		return tx.Exec(ctx, insertSQL, args...)
+	})
+}
+
+// AddJobsWithTx adds multiple jobs as part of an existing transaction
+func (s *Swig) AddJobsWithTx(ctx context.Context, tx interface{}, jobs []drivers.BatchJob) error {
+	return s.driver.AddJobsWithTx(ctx, tx, jobs)
 }

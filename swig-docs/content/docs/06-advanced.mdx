@@ -1,0 +1,171 @@
+---
+title: Advanced Concepts
+description: Deep dive into Swig's advanced features and architecture
+---
+
+# Advanced Concepts
+
+## Transactional Integrity
+
+In distributed systems, especially job queues, transactional integrity is crucial. Swig offers three levels of transaction control:
+
+### 1. Bring Your Own Transaction (Recommended)
+
+Use your existing database transaction for maximum control:
+
+```go
+tx, _ := pool.Begin(ctx)
+defer tx.Rollback(ctx)
+
+// Create user
+userID := createUser(tx)
+
+// Enqueue welcome email in same transaction
+err := swigClient.AddJobWithTx(ctx, tx, &EmailWorker{
+    To: email,
+    Subject: "Welcome!",
+})
+if err != nil {
+    return err
+}
+return tx.Commit(ctx)
+```
+
+### 2. Use Swig's Transaction Helper
+
+Let Swig manage the transaction for you:
+
+```go
+err := swigClient.driver.WithTx(ctx, func(tx Transaction) error {
+    // Create user
+    if err := createUser(tx); err != nil {
+        return err // Triggers rollback
+    }
+    
+    // Add job (auto rollback if this fails)
+    return tx.Exec(ctx, insertJobSQL, ...)
+})
+```
+
+### 3. No Transaction (Simple)
+
+For simple, non-transactional job enqueueing:
+
+```go
+err := swigClient.AddJob(ctx, &EmailWorker{
+    To: email,
+    Subject: "Welcome!",
+})
+```
+
+## Benefits of Transactional Job Processing
+
+- **No Lost Jobs**: Jobs are either fully committed or not at all
+- **Atomic Processing**: Jobs are processed exactly once using PostgreSQL's SKIP LOCK
+- **Data Consistency**: Jobs can be part of your application's transactions
+
+## Architecture
+
+Swig uses PostgreSQL's advanced features for efficient job distribution:
+
+### SKIP LOCK for Job Distribution
+
+Swig uses PostgreSQL's SKIP LOCK feature to ensure:
+- No duplicate job processing
+- Fair job distribution across workers
+- High availability
+- Transactional integrity
+
+### Leader Election
+
+Built-in leader election using PostgreSQL advisory locks ensures:
+- Only one worker processes jobs at a time
+- Automatic failover if the leader fails
+- No external coordination needed
+
+## Batch Processing
+
+Swig supports efficient batch insertion of multiple jobs:
+
+### Basic Batch Insertion
+
+```go
+jobs := []swig.BatchJob{
+    {
+        Worker: &EmailWorker{To: "user1@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.Default},
+    },
+    {
+        Worker: &EmailWorker{To: "user2@example.com", Subject: "Welcome"},
+        Opts:   swig.JobOptions{Queue: swig.Default},
+    },
+}
+
+err := swig.AddJobs(ctx, jobs)
+```
+
+### Transactional Batch Insertion
+
+```go
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    log.Fatalf("Failed to begin transaction: %v", err)
+}
+defer tx.Rollback()
+
+err = swig.AddJobsWithTx(ctx, tx, jobs)
+if err != nil {
+    log.Fatalf("Failed to add jobs: %v", err)
+}
+
+if err := tx.Commit(); err != nil {
+    log.Fatalf("Failed to commit transaction: %v", err)
+}
+```
+
+## Performance Considerations
+
+### Batch Processing
+
+- Batch insertion is significantly faster than individual inserts
+- Optimal batch size depends on your database configuration
+- Monitor memory usage for large batches
+
+### Driver Selection
+
+Swig supports two PostgreSQL drivers with different characteristics:
+
+1. **pgx Driver** (Recommended)
+   - Better performance
+   - Native LISTEN/NOTIFY support
+   - Real-time job notifications
+   - Optimized for batch operations
+
+2. **database/sql Driver**
+   - Standard Go database interface
+   - Requires `github.com/lib/pq` for LISTEN/NOTIFY
+   - Simpler implementation
+   - Good for most use cases
+
+## Cleanup and Testing
+
+Swig provides methods for both graceful shutdown and complete cleanup:
+
+```go
+// Graceful shutdown: Wait for jobs to complete
+err := swigClient.Stop(ctx)
+
+// Complete cleanup: Drop all Swig tables
+err := swigClient.Close(ctx)
+```
+
+The `Close` method is particularly useful in:
+- Testing environments
+- Development scenarios
+- CI/CD pipelines
+
+## Next Steps
+
+- [Examples](/docs/examples) - See these concepts in action
+- [API Reference](/docs/api) - Detailed API documentation
+- [Configuration](/docs/configuration) - Learn how to configure Swig for your needs 

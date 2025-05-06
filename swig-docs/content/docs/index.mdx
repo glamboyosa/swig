@@ -1,0 +1,114 @@
+---
+title: Introduction
+description: A PostgreSQL-powered job queue for Go applications
+---
+
+# Swig
+
+> Job queues as refreshing as taking a swig 🍺
+
+Swig is a robust, PostgreSQL-backed job queue system for Go applications, designed for developers who need reliable background job processing with minimal setup.
+
+⚠️ **Alpha Status**: Swig is currently in alpha and actively being developed towards v1.0.0. The API may undergo changes during this phase. For stability in production environments, we strongly recommend pinning to a specific version:
+
+```bash
+go get github.com/glamboyosa/swig@v0.1.14-alpha
+```
+
+## Features
+
+- **PostgreSQL Integration**: Built on top of PostgreSQL for reliability and scalability
+- **Go-First Design**: Native Go implementation with idiomatic patterns
+- **Simple API**: Easy to use with minimal boilerplate
+- **Distributed Processing**: Run multiple workers across different machines
+- **Transaction Support**: Integrate with your existing database transactions
+- **Batch Processing**: Efficiently add multiple jobs in a single operation
+
+## Why PostgreSQL?
+
+Swig leverages PostgreSQL's powerful features to provide a robust job queue solution:
+
+- **Self-Hosted**: No external services required - just your existing PostgreSQL database
+- **Transactional Guarantees**: Jobs are processed exactly once with ACID compliance
+- **Built-in Queue Management**: Uses PostgreSQL's SKIP LOCK for efficient job distribution
+- **Leader Election**: Automatic leader election using PostgreSQL advisory locks
+- **Real-time Notifications**: Native LISTEN/NOTIFY support for immediate job processing
+- **Scalability**: Process jobs across multiple machines without external coordination
+
+## Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "database/sql"
+    _ "github.com/lib/pq"
+    "github.com/glamboyosa/swig/drivers"
+    import swig "github.com/glamboyosa/swig"
+)
+
+// 1. Define your worker
+type EmailWorker struct {
+    To      string `json:"to"`
+    Subject string `json:"subject"`
+    Body    string `json:"body"`
+}
+
+func (w *EmailWorker) JobName() string {
+    return "send_email"
+}
+
+func (w *EmailWorker) Process(ctx context.Context) error {
+    return sendEmail(w.To, w.Subject, w.Body)
+}
+
+func main() {
+    ctx := context.Background()
+
+    // Setup database connection (choose one)
+    
+    // Option A: Using pgx
+    pgxConfig, _ := pgxpool.ParseConfig("postgres://localhost:5432/myapp")
+    pgxPool, _ := pgxpool.NewWithConfig(ctx, pgxConfig)
+    driver, _ := drivers.NewPgxDriver(pgxPool)
+    
+    // Option B: Using database/sql
+    // db, _ := sql.Open("postgres", "postgres://localhost:5432/myapp")
+    // driver, _ := drivers.NewSQLDriver(db, connString)
+    
+    // Create a worker registry and register your workers
+    workers := swig.NewWorkerRegistry()
+    workers.RegisterWorker(&EmailWorker{})
+    
+    // Configure queues (default setup)
+    configs := []swig.SwigQueueConfig{
+        {QueueType: swig.Default, MaxWorkers: 5},
+    }
+    
+    // Create and start Swig with worker registry
+    swigClient := swig.NewSwig(driver, configs, workers)
+    swigClient.Start(ctx)
+    
+    // Add a job (uses default queue)
+    err := swigClient.AddJob(ctx, &EmailWorker{
+        To:      "user@example.com",
+        Subject: "Welcome!",
+        Body:    "Hello from Swig",
+    })
+}
+```
+
+## Why Swig?
+
+Swig was created to provide a reliable, PostgreSQL-based job queue for Go applications. It leverages PostgreSQL's robust transaction support and durability guarantees to ensure your jobs are processed reliably.
+
+Built by [Timothy Ogbemudia](https://glamboyosa.xyz) (glamboyosa), Swig combines the power of PostgreSQL with Go's simplicity to deliver a robust job queue solution.
+
+## Documentation
+
+- [Installation](/docs/installation) - How to install and set up Swig
+- [Configuration](/docs/configuration) - Learn how to configure Swig for your needs
+- [Examples](/docs/examples) - Practical examples of using Swig
+- [API Reference](/docs/api) - Detailed API documentation
