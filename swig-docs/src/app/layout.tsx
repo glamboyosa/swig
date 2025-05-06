@@ -27,11 +27,8 @@ export const metadata: Metadata = {
     card: 'summary_large_image',
     title: 'Swig Documentation',
     description: 'Comprehensive documentation for Swig, a background job processing library.',
-    // site: '@yourTwitterHandle', // Replace with your site's Twitter handle
-    // creator: '@yourPersonalTwitterHandle', // Replace with your personal Twitter handle
-    images: ['/api/og'], // Relative path to the OG image route
+    images: ['/api/og'],
   },
-  // You can add more metadata here, like icons, manifest, etc.
 };
 
 const inter = Inter({

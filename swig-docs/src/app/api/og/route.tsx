@@ -20,7 +20,8 @@ export async function GET() {
           textAlign: 'center',
           justifyContent: 'center',
           alignItems: 'center',
-          fontFamily: 'sans-serif', 
+          fontFamily: 'sans-serif',
+          font: "Inter", 
         }}
       >
         Swig 🍺: Background Jobs Made Easy
