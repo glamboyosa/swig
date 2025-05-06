@@ -90,37 +90,89 @@ Swig supports efficient batch insertion of multiple jobs:
 ### Basic Batch Insertion
 
 ```go
-jobs := []swig.BatchJob{
+batchJobs := []drivers.BatchJob{
     {
-        Worker: &EmailWorker{To: "user1@example.com", Subject: "Welcome"},
-        Opts:   swig.JobOptions{Queue: swig.Default},
+        Worker: &EmailWorker{
+            To: "batch1@example.com",
+            Subject: "Batch Welcome",
+            Body: "Welcome to our platform!",
+        },
+        Opts: drivers.JobOptions{
+            Queue: "default",
+            Priority: 1,
+            RunAt: time.Now(),
+        },
     },
     {
-        Worker: &EmailWorker{To: "user2@example.com", Subject: "Welcome"},
-        Opts:   swig.JobOptions{Queue: swig.Default},
+        Worker: &EmailWorker{
+            To: "batch2@example.com",
+            Subject: "Batch Welcome",
+            Body: "Welcome to our platform!",
+        },
+        Opts: drivers.JobOptions{
+            Queue: "default",
+            Priority: 1,
+            RunAt: time.Now(),
+        },
     },
 }
 
-err := swig.AddJobs(ctx, jobs)
+err := swigClient.AddJobs(ctx, batchJobs)
+if err != nil {
+    log.Printf("Failed to add batch jobs: %v", err)
+} else {
+    log.Println("Batch jobs added successfully")
+}
 ```
 
 ### Transactional Batch Insertion
 
 ```go
-tx, err := db.BeginTx(ctx, nil)
+tx, err := db.Begin()
 if err != nil {
-    log.Fatalf("Failed to begin transaction: %v", err)
+    log.Printf("Failed to begin transaction: %v", err)
+    return
 }
 defer tx.Rollback()
 
-err = swig.AddJobsWithTx(ctx, tx, jobs)
-if err != nil {
-    log.Fatalf("Failed to add jobs: %v", err)
+txBatchJobs := []drivers.BatchJob{
+    {
+        Worker: &EmailWorker{
+            To: "tx1@example.com",
+            Subject: "Transactional Welcome",
+            Body: "Welcome to our platform!",
+        },
+        Opts: drivers.JobOptions{
+            Queue: "default",
+            Priority: 1,
+            RunAt: time.Now(),
+        },
+    },
+    {
+        Worker: &EmailWorker{
+            To: "tx2@example.com",
+            Subject: "Transactional Welcome",
+            Body: "Welcome to our platform!",
+        },
+        Opts: drivers.JobOptions{
+            Queue: "default",
+            Priority: 1,
+            RunAt: time.Now(),
+        },
+    },
+}
+
+log.Println("Adding transactional batch jobs...")
+if err := swigClient.AddJobsWithTx(ctx, tx, txBatchJobs); err != nil {
+    log.Printf("Failed to add transactional batch jobs: %v", err)
+    return
 }
 
 if err := tx.Commit(); err != nil {
-    log.Fatalf("Failed to commit transaction: %v", err)
+    log.Printf("Failed to commit transaction: %v", err)
+    return
 }
+log.Println("Transactional batch jobs added successfully")
 ```
 
 ## Performance Considerations
