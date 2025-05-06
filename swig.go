@@ -742,12 +742,6 @@ func (s *Swig) Close(ctx context.Context) error {
 	return nil
 }
 
-// BatchJob represents a job to be inserted in a batch operation
-type BatchJob struct {
-	Worker interface{}
-	Opts   JobOptions
-}
-
 // AddJobs adds multiple jobs in a single database operation
 func (s *Swig) AddJobs(ctx context.Context, jobs []drivers.BatchJob) error {
 	if len(jobs) == 0 {

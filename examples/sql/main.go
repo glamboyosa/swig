@@ -216,54 +216,58 @@ func main() {
 		log.Printf("Failed to add scheduled job: %v", err)
 	}
 
+	// Example: Batch job insertion
 	/*
-		// Example: Batch job insertion
 		batchJobs := []drivers.BatchJob{
 			{
-				Worker: &EmailWorker{To: "batch1@example.com", Subject: "Batch Welcome"},
-				Opts:   drivers.JobOptions{Queue: "default"},
+				Worker: &EmailWorker{To: "batch1@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
+				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
 			},
 			{
-				Worker: &EmailWorker{To: "batch2@example.com", Subject: "Batch Welcome"},
-				Opts:   drivers.JobOptions{Queue: "default"},
+				Worker: &EmailWorker{To: "batch2@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
+				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
 			},
 			{
-				Worker: &EmailWorker{To: "batch3@example.com", Subject: "Batch Welcome"},
-				Opts:   drivers.JobOptions{Queue: "default"},
+				Worker: &EmailWorker{To: "batch3@example.com", Subject: "Batch Welcome", Body: "Welcome to our platform!"},
+				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
 			},
 		}
 
 		log.Println("Adding batch jobs...")
-		if err := swig.AddJobs(ctx, batchJobs); err != nil {
-			log.Fatalf("Failed to add batch jobs: %v", err)
+		if err := swigClient.AddJobs(ctx, batchJobs); err != nil {
+			log.Printf("Failed to add batch jobs: %v", err)
+		} else {
+			log.Println("Batch jobs added successfully")
 		}
-		log.Println("Batch jobs added successfully")
 
 		// Example: Transactional batch insertion
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err = db.Begin()
 		if err != nil {
-			log.Fatalf("Failed to begin transaction: %v", err)
+			log.Printf("Failed to begin transaction: %v", err)
+			return
 		}
 		defer tx.Rollback()
 
 		txBatchJobs := []drivers.BatchJob{
 			{
-				Worker: &EmailWorker{To: "tx1@example.com", Subject: "Transactional Welcome"},
-				Opts:   drivers.JobOptions{Queue: "default"},
+				Worker: &EmailWorker{To: "tx1@example.com", Subject: "Transactional Welcome", Body: "Welcome to our platform!"},
+				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
 			},
 			{
-				Worker: &EmailWorker{To: "tx2@example.com", Subject: "Transactional Welcome"},
-				Opts:   drivers.JobOptions{Queue: "default"},
+				Worker: &EmailWorker{To: "tx2@example.com", Subject: "Transactional Welcome", Body: "Welcome to our platform!"},
+				Opts:   swig.JobOptions{Queue: swig.Default, Priority: 1, RunAt: time.Now()},
 			},
 		}
 
 		log.Println("Adding transactional batch jobs...")
-		if err := swig.AddJobsWithTx(ctx, tx, txBatchJobs); err != nil {
-			log.Fatalf("Failed to add transactional batch jobs: %v", err)
+		if err := swigClient.AddJobsWithTx(ctx, tx, txBatchJobs); err != nil {
+			log.Printf("Failed to add transactional batch jobs: %v", err)
+			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			log.Fatalf("Failed to commit transaction: %v", err)
+			log.Printf("Failed to commit transaction: %v", err)
+			return
 		}
 		log.Println("Transactional batch jobs added successfully")
 	*/
