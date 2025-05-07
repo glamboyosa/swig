@@ -19,9 +19,9 @@ go get github.com/glamboyosa/swig@v0.1.17-alpha
 
 ## Database Setup
 
-### 1. Create the Jobs Table
+Swig requires a PostgreSQL database to store job information. It will automatically create the necessary `swig_jobs` table if it doesn't already exist.
 
-Run the following SQL migration to create the required table:
+The table schema is as follows. You typically do not need to interact with this table directly.
 
 ```sql
 CREATE TABLE IF NOT EXISTS swig_jobs (
@@ -41,7 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_swig_jobs_queue ON swig_jobs (queue);
 CREATE INDEX IF NOT EXISTS idx_swig_jobs_run_at ON swig_jobs (run_at);
 ```
 
-### 2. Choose Your Driver
+### Choose Your Driver
 
 Swig supports two PostgreSQL driver implementations:
 
