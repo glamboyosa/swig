@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,8 @@ type Driver interface {
 	// New method to handle external transactions
 	AddJobWithTx(ctx context.Context, tx interface{}) (Transaction, error)
 	WaitForNotification(ctx context.Context) (*Notification, error)
+	NewListener(ctx context.Context, channel string) (Listener, error)
+	TryAdvisoryLock(ctx context.Context, lockID int64) (AdvisoryLock, bool, error)
 	AddJobsWithTx(ctx context.Context, tx interface{}, jobs []BatchJob) error
 }
 
@@ -31,6 +34,21 @@ type Transaction interface {
 	Exec(ctx context.Context, sql string, args ...interface{}) error
 	Query(ctx context.Context, sql string, args ...interface{}) (Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...interface{}) Row
+}
+
+// Listener represents a dedicated PostgreSQL LISTEN session.
+type Listener interface {
+	WaitForNotification(ctx context.Context) (*Notification, error)
+	Close(ctx context.Context) error
+}
+
+// AdvisoryLock represents a session-scoped advisory lock held on one connection.
+type AdvisoryLock interface {
+	Exec(ctx context.Context, sql string, args ...interface{}) error
+	Query(ctx context.Context, sql string, args ...interface{}) (Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) Row
+	Unlock(ctx context.Context) error
+	Close(ctx context.Context) error
 }
 
 // PgxTx represents a pgx transaction that can be passed in
@@ -75,4 +93,8 @@ type JobOptions struct {
 	Queue    string
 	Priority int
 	RunAt    time.Time
+}
+
+func quoteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }

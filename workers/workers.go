@@ -3,8 +3,14 @@ package workers
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 )
+
+type runtimeWorker interface {
+	JobName() string
+	Process(context.Context) error
+}
 
 type Job[T any] struct {
 	ID        string
@@ -25,7 +31,7 @@ type Job[T any] struct {
 // TODO: Implement polling fallback for environments where LISTEN/NOTIFY
 // is not available or configured.
 type WorkerRegistry struct {
-	workers map[string]interface{} // stores Worker[T] instances
+	workers map[string]func() interface{}
 }
 
 type Worker[T any] interface {
@@ -35,7 +41,7 @@ type Worker[T any] interface {
 
 func NewWorkerRegistry() *WorkerRegistry {
 	return &WorkerRegistry{
-		workers: make(map[string]interface{}),
+		workers: make(map[string]func() interface{}),
 	}
 }
 
@@ -43,17 +49,48 @@ func NewWorkerRegistry() *WorkerRegistry {
 // It accepts any type that implements the Worker interface and performs
 // runtime type checking to ensure the worker is properly implemented.
 func (wr *WorkerRegistry) RegisterWorker(worker interface{}) error {
-	// Type assert to check if it implements required methods
-	if w, ok := worker.(interface{ JobName() string }); !ok {
-		return fmt.Errorf("worker must implement JobName() string")
-	} else {
-		wr.workers[w.JobName()] = worker
+	w, ok := worker.(runtimeWorker)
+	if !ok {
+		if _, hasName := worker.(interface{ JobName() string }); !hasName {
+			return fmt.Errorf("worker must implement JobName() string")
+		}
+		return fmt.Errorf("worker must implement Process(context.Context) error")
+	}
+
+	workerType := reflect.TypeOf(worker)
+	if workerType == nil {
+		return fmt.Errorf("worker must not be nil")
+	}
+	workerValue := reflect.ValueOf(worker)
+	if workerType.Kind() == reflect.Ptr && workerValue.IsNil() {
+		return fmt.Errorf("worker must not be nil")
+	}
+
+	jobName := w.JobName()
+
+	if workerType.Kind() != reflect.Ptr {
+		wr.workers[jobName] = func() interface{} {
+			return worker
+		}
 		return nil
 	}
+
+	elemType := workerType.Elem()
+	if elemType.Kind() != reflect.Struct {
+		return fmt.Errorf("worker must be a pointer to a struct")
+	}
+
+	wr.workers[jobName] = func() interface{} {
+		return reflect.New(elemType).Interface()
+	}
+	return nil
 }
 
 // GetWorker retrieves a worker implementation by its job name
 func (wr *WorkerRegistry) GetWorker(jobName string) (interface{}, bool) {
-	worker, exists := wr.workers[jobName]
-	return worker, exists
+	factory, exists := wr.workers[jobName]
+	if !exists {
+		return nil, false
+	}
+	return factory(), true
 }

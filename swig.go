@@ -22,10 +22,10 @@ const (
 	Default  QueueTypes = "default"
 	Priority QueueTypes = "priority"
 
-	leaderLockID  = 1234567 // Arbitrary number for advisory lock
-	leaderKey     = "queue_leader"
-	leaderTTL     = 30 * time.Second
-	retryInterval = 5 * time.Second
+	leaderLockID  int64 = 1234567 // Arbitrary number for advisory lock
+	leaderKey           = "queue_leader"
+	leaderTTL           = 30 * time.Second
+	retryInterval       = 5 * time.Second
 )
 
 // minimum number of workers to start
@@ -43,9 +43,13 @@ type Swig struct {
 	driver          drivers.Driver
 	Workers         workers.WorkerRegistry
 	activeWorkers   sync.WaitGroup // Track active workers
-	shutdown        chan struct{}  // Signal for graceful shutdown
-	leaderID        string         // Current leader ID if we're the leader
-	workerID        string         // Unique ID for this worker instance
+	leaderMu        sync.Mutex
+	stopOnce        sync.Once     // Make shutdown safe to call once or many times
+	shutdown        chan struct{} // Signal for graceful shutdown
+	workerCancel    context.CancelFunc
+	leaderLock      drivers.AdvisoryLock
+	leaderID        string // Current leader ID if we're the leader
+	workerID        string // Unique ID for this worker instance
 }
 
 // NewSwig creates a new job queue instance with the specified database driver,
@@ -77,57 +81,122 @@ func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers w
 }
 
 // tryBecomeLeader attempts to acquire leadership using advisory locks
-func (s *Swig) tryBecomeLeader(ctx context.Context) error {
-	// Try to acquire advisory lock
-	var acquired bool
-	err := s.driver.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, leaderLockID).Scan(&acquired)
-	if err != nil || !acquired {
-		return fmt.Errorf("failed to acquire leader lock: %w", err)
+func (s *Swig) tryBecomeLeader(ctx context.Context) (drivers.AdvisoryLock, bool, error) {
+	lock, acquired, err := s.driver.TryAdvisoryLock(ctx, leaderLockID)
+	if err != nil {
+		return nil, false, err
+	}
+	if !acquired {
+		return nil, false, nil
 	}
 
 	// If we got the lock, update the leader table
-	s.leaderID = pkg.GenerateWorkerID()
-	err = s.driver.Exec(ctx, `
+	leaderID := pkg.GenerateWorkerID()
+	err = lock.Exec(ctx, `
 		INSERT INTO swig_leader (id, leader_id, expires_at)
 		VALUES ($1, $2, NOW() + $3::interval)
 		ON CONFLICT (id) DO UPDATE
 		SET leader_id = $2,
 			expires_at = NOW() + $3::interval
-	`, leaderKey, s.leaderID, leaderTTL.String())
+	`, leaderKey, leaderID, leaderTTL.String())
 
 	if err != nil {
-		// Release the advisory lock if we couldn't update the table
-		s.driver.Exec(ctx, `SELECT pg_advisory_unlock($1)`, leaderLockID)
-		return fmt.Errorf("failed to update leader record: %w", err)
+		if closeErr := lock.Close(ctx); closeErr != nil {
+			log.Printf("Failed to release leader lock after setup error: %v", closeErr)
+		}
+		return nil, false, fmt.Errorf("failed to update leader record: %w", err)
 	}
 
-	// Start leader duties in background
-	go s.performLeaderDuties(ctx)
+	s.leaderMu.Lock()
+	s.leaderID = leaderID
+	s.leaderLock = lock
+	s.leaderMu.Unlock()
 
-	return nil
+	return lock, true, nil
 }
 
-// performLeaderDuties handles leader responsibilities like retrying failed jobs
-func (s *Swig) performLeaderDuties(ctx context.Context) {
+func (s *Swig) startLeaderElection(ctx context.Context) {
 	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
 
 	for {
+		lock, acquired, err := s.tryBecomeLeader(ctx)
+		if err != nil {
+			log.Printf("Failed to become leader: %v", err)
+		}
+		if acquired {
+			log.Printf("Acquired Swig leadership")
+			if err := s.performLeaderDuties(ctx, lock); err != nil {
+				log.Printf("Leader duties stopped: %v", err)
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.shutdown:
 			return
 		case <-ticker.C:
-			if err := s.retryFailedJobs(ctx); err != nil {
-				log.Printf("Error retrying failed jobs: %v", err)
+		}
+	}
+}
+
+func (s *Swig) releaseLeader(ctx context.Context, lock drivers.AdvisoryLock) {
+	s.leaderMu.Lock()
+	if lock == nil {
+		lock = s.leaderLock
+	}
+	if lock == nil || lock != s.leaderLock {
+		s.leaderMu.Unlock()
+		return
+	}
+
+	leaderID := s.leaderID
+	s.leaderID = ""
+	s.leaderLock = nil
+	s.leaderMu.Unlock()
+
+	if leaderID != "" {
+		unlockSQL := `
+			DELETE FROM swig_leader
+			WHERE leader_id = $1
+		`
+		if err := s.driver.Exec(ctx, unlockSQL, leaderID); err != nil {
+			log.Printf("Failed to delete leader record: %v", err)
+		}
+	}
+
+	if err := lock.Close(ctx); err != nil {
+		log.Printf("Failed to release advisory lock: %v", err)
+	}
+}
+
+// performLeaderDuties handles leader responsibilities like retrying failed jobs
+func (s *Swig) performLeaderDuties(ctx context.Context, lock drivers.AdvisoryLock) error {
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.releaseLeader(releaseCtx, lock)
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-s.shutdown:
+			return nil
+		case <-ticker.C:
+			if err := s.retryFailedJobs(ctx, lock); err != nil {
+				return err
 			}
 		}
 	}
 }
 
 // retryFailedJobs finds failed jobs that can be retried and requeues them
-func (s *Swig) retryFailedJobs(ctx context.Context) error {
+func (s *Swig) retryFailedJobs(ctx context.Context, tx drivers.Transaction) error {
 	// Find failed jobs that haven't exceeded max attempts and apply backoff
 	retrySQL := `
 		UPDATE swig_jobs
@@ -155,7 +224,7 @@ func (s *Swig) retryFailedJobs(ctx context.Context) error {
 
 	var jobIDs []string
 	var totalAttempts int
-	rows, err := s.driver.Query(ctx, retrySQL)
+	rows, err := tx.Query(ctx, retrySQL)
 	if err != nil {
 		// Don't report context cancellation as an error - this is normal during shutdown
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -243,13 +312,19 @@ func (s *Swig) Start(ctx context.Context) {
 	-- Unlogged for better performance since this is temporary state
 	ALTER TABLE swig_leader SET UNLOGGED;`
 
-	s.driver.Exec(ctx, createTableSQL)
-	s.driver.Exec(ctx, createLeaderTableSQL)
-
-	// Try to become leader
-	if err := s.tryBecomeLeader(ctx); err != nil {
-		log.Printf("Failed to become leader: %v", err)
+	if err := s.driver.Exec(ctx, createTableSQL); err != nil {
+		log.Printf("Failed to create swig_jobs table: %v", err)
+		return
 	}
+	if err := s.driver.Exec(ctx, createLeaderTableSQL); err != nil {
+		log.Printf("Failed to create swig_leader table: %v", err)
+		return
+	}
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	s.workerCancel = cancel
+
+	go s.startLeaderElection(workerCtx)
 
 	// Start worker pools for each queue
 	for _, config := range s.swigQueueConfig {
@@ -263,7 +338,7 @@ func (s *Swig) Start(ctx context.Context) {
 			s.activeWorkers.Add(1)
 			go func(qType QueueTypes) {
 				defer s.activeWorkers.Done()
-				s.startWorker(ctx, qType)
+				s.startWorker(workerCtx, qType)
 			}(config.QueueType)
 		}
 	}
@@ -278,8 +353,13 @@ func (s *Swig) Stop(ctx context.Context) error {
 		defer cancel()
 	}
 
-	// Signal all workers to stop
-	close(s.shutdown)
+	// Signal all workers to stop. sync.Once makes Stop safe to call repeatedly.
+	s.stopOnce.Do(func() {
+		close(s.shutdown)
+		if s.workerCancel != nil {
+			s.workerCancel()
+		}
+	})
 
 	// Wait for all workers to finish their current jobs
 	done := make(chan struct{})
@@ -306,21 +386,7 @@ func (s *Swig) Stop(ctx context.Context) error {
 		log.Printf("Failed to cleanup instance jobs: %v", err)
 	}
 
-	// Release any leader locks we might be holding
-	if s.leaderID != "" {
-		unlockSQL := `
-			DELETE FROM swig_leader
-			WHERE leader_id = $1
-		`
-		if err := s.driver.Exec(ctx, unlockSQL, s.leaderID); err != nil {
-			log.Printf("Failed to release leader lock: %v", err)
-		}
-
-		// Also release the advisory lock
-		if err := s.driver.Exec(ctx, `SELECT pg_advisory_unlock($1)`, leaderLockID); err != nil {
-			log.Printf("Failed to release advisory lock: %v", err)
-		}
-	}
+	s.releaseLeader(ctx, nil)
 
 	// Close database connections cleanly
 	if closer, ok := s.driver.(interface{ Close() error }); ok {
@@ -527,19 +593,28 @@ func (s *Swig) AddJobWithTx(ctx context.Context, tx interface{}, workerWithArgs 
 // 2. Attempts to acquire and process jobs using SELECT FOR UPDATE SKIP LOCKED
 // 3. Handles job completion and failure
 func (s *Swig) startWorker(ctx context.Context, queueType QueueTypes) {
-	// Start listening for notifications
-	if err := s.driver.Listen(ctx, "swig_jobs"); err != nil {
+	listener, err := s.driver.NewListener(ctx, "swig_jobs")
+	if err != nil {
 		log.Printf("Failed to start listening: %v", err)
 		return
 	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := listener.Close(closeCtx); err != nil {
+			log.Printf("Failed to close listener: %v", err)
+		}
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.shutdown:
+			return
 		default:
 			// Try to acquire and process a job
-			if err := s.processNextJob(ctx, queueType); err != nil {
+			if err := s.processNextJob(ctx, queueType, listener); err != nil {
 				log.Printf("Error processing job: %v", err)
 				// Small backoff on error
 				time.Sleep(time.Second)
@@ -549,7 +624,7 @@ func (s *Swig) startWorker(ctx context.Context, queueType QueueTypes) {
 }
 
 // processNextJob attempts to acquire and process the next available job using SKIP LOCKED
-func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
+func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listener drivers.Listener) error {
 	// Generate unique worker ID for this job acquisition
 	workerID := pkg.GenerateWorkerID()
 
@@ -677,7 +752,7 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes) error {
 	}
 
 	// If no job was available, wait for notification
-	notification, err := s.driver.WaitForNotification(ctx)
+	notification, err := listener.WaitForNotification(ctx)
 	if err != nil {
 		// Don't report context cancellation as an error - this is normal during shutdown
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
