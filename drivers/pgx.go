@@ -15,6 +15,16 @@ type PgxDriver struct {
 	pool *pgxpool.Pool
 }
 
+type pgxListener struct {
+	conn    *pgxpool.Conn
+	channel string
+}
+
+type pgxAdvisoryLock struct {
+	conn   *pgxpool.Conn
+	lockID int64
+}
+
 type pgxTxAdapter struct {
 	tx pgx.Tx
 }
@@ -51,6 +61,51 @@ func (tx *pgxTxAdapter) Query(ctx context.Context, sql string, args ...interface
 
 func (tx *pgxTxAdapter) QueryRow(ctx context.Context, sql string, args ...interface{}) Row {
 	return tx.tx.QueryRow(ctx, sql, args...)
+}
+
+func (l *pgxListener) WaitForNotification(ctx context.Context) (*Notification, error) {
+	notification, err := l.conn.Conn().WaitForNotification(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait for notification error: %w", err)
+	}
+
+	return &Notification{
+		Channel: notification.Channel,
+		Payload: notification.Payload,
+	}, nil
+}
+
+func (l *pgxListener) Close(ctx context.Context) error {
+	defer l.conn.Release()
+	_, err := l.conn.Exec(ctx, "UNLISTEN "+quoteIdentifier(l.channel))
+	return err
+}
+
+func (l *pgxAdvisoryLock) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	_, err := l.conn.Exec(ctx, sql, args...)
+	return err
+}
+
+func (l *pgxAdvisoryLock) Query(ctx context.Context, sql string, args ...interface{}) (Rows, error) {
+	rows, err := l.conn.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &pgxRowsAdapter{rows: rows}, nil
+}
+
+func (l *pgxAdvisoryLock) QueryRow(ctx context.Context, sql string, args ...interface{}) Row {
+	return l.conn.QueryRow(ctx, sql, args...)
+}
+
+func (l *pgxAdvisoryLock) Unlock(ctx context.Context) error {
+	_, err := l.conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, l.lockID)
+	return err
+}
+
+func (l *pgxAdvisoryLock) Close(ctx context.Context) error {
+	defer l.conn.Release()
+	return l.Unlock(ctx)
 }
 
 // NewPgxDriver creates a new pgx-based driver implementation for PostgreSQL.
@@ -109,7 +164,7 @@ func (d *PgxDriver) QueryRow(ctx context.Context, sql string, args ...interface{
 }
 
 func (d *PgxDriver) Listen(ctx context.Context, channel string) error {
-	_, err := d.pool.Exec(ctx, "LISTEN "+channel)
+	_, err := d.pool.Exec(ctx, "LISTEN "+quoteIdentifier(channel))
 	return err
 }
 
@@ -144,6 +199,43 @@ func (d *PgxDriver) WaitForNotification(ctx context.Context) (*Notification, err
 		Channel: pgxNotification.Channel,
 		Payload: pgxNotification.Payload,
 	}, nil
+}
+
+// NewListener creates a dedicated connection for LISTEN/NOTIFY. PostgreSQL
+// listeners are session-scoped, so the same connection must both LISTEN and wait.
+func (d *PgxDriver) NewListener(ctx context.Context, channel string) (Listener, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire listener connection: %w", err)
+	}
+
+	if _, err := conn.Exec(ctx, "LISTEN "+quoteIdentifier(channel)); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("failed to listen on %s: %w", channel, err)
+	}
+
+	return &pgxListener{conn: conn, channel: channel}, nil
+}
+
+// TryAdvisoryLock acquires a session-scoped advisory lock on a dedicated
+// connection and returns that connection wrapped as the lock owner.
+func (d *PgxDriver) TryAdvisoryLock(ctx context.Context, lockID int64) (AdvisoryLock, bool, error) {
+	conn, err := d.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to acquire advisory lock connection: %w", err)
+	}
+
+	var acquired bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, lockID).Scan(&acquired); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+	if !acquired {
+		conn.Release()
+		return nil, false, nil
+	}
+
+	return &pgxAdvisoryLock{conn: conn, lockID: lockID}, true, nil
 }
 
 // AddJobsWithTx adds multiple jobs as part of an existing transaction

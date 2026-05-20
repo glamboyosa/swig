@@ -61,27 +61,43 @@ err := swigClient.AddJob(ctx, &EmailWorker{
 ## Benefits of Transactional Job Processing
 
 - **No Lost Jobs**: Jobs are either fully committed or not at all
-- **Atomic Processing**: Jobs are processed exactly once using PostgreSQL's SKIP LOCK
+- **Atomic Claiming**: Workers claim jobs with PostgreSQL's `SKIP LOCKED` row locks
 - **Data Consistency**: Jobs can be part of your application's transactions
 
 ## Architecture
 
 Swig uses PostgreSQL's advanced features for efficient job distribution:
 
-### SKIP LOCK for Job Distribution
+### Worker Factories
 
-Swig uses PostgreSQL's SKIP LOCK feature to ensure:
+Workers are registered once by job name, but Swig creates a fresh worker instance for each claimed job before unmarshaling the job payload. This keeps concurrent jobs from mutating the same registered worker value.
+
+### SKIP LOCKED for Job Distribution
+
+Swig uses PostgreSQL's `FOR UPDATE SKIP LOCKED` feature to ensure:
 - No duplicate job processing
 - Fair job distribution across workers
 - High availability
 - Transactional integrity
 
+The row lock plays a similar coordination role to a mutex, but at the database level. A Go mutex protects memory inside one process. PostgreSQL row locks protect shared job rows across processes and machines.
+
+### Dedicated LISTEN/NOTIFY Connections
+
+PostgreSQL `LISTEN` is session-scoped. A listener must wait for notifications on the same connection that executed `LISTEN`.
+
+Swig now creates a dedicated listener for each worker. The listener stays open for the worker lifetime, receives `swig_jobs` notifications, and is closed during shutdown. This avoids subtle connection-pool bugs where `LISTEN` happens on one pooled connection but notification waiting happens on another.
+
 ### Leader Election
 
 Built-in leader election using PostgreSQL advisory locks ensures:
-- Only one worker processes jobs at a time
+- Only one Swig instance performs leader duties at a time
 - Automatic failover if the leader fails
 - No external coordination needed
+
+Advisory locks are also session-scoped, so Swig acquires the leader lock on a dedicated connection and keeps that connection open while leader duties run. On shutdown, Swig releases the advisory lock from the same session that acquired it.
+
+Instances that do not become leader keep retrying leadership in the background. If the active leader connection dies, PostgreSQL releases the advisory lock and another Swig instance can acquire leadership on a later retry.
 
 ## Batch Processing
 
@@ -204,7 +220,7 @@ Swig supports two PostgreSQL drivers with different characteristics:
 Swig provides methods for both graceful shutdown and complete cleanup:
 
 ```go
-// Graceful shutdown: Wait for jobs to complete
+// Graceful shutdown: cancel workers, wait for them, and release leader resources
 err := swigClient.Stop(ctx)
 
 // Complete cleanup: Drop all Swig tables

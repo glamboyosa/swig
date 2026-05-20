@@ -29,10 +29,10 @@ go get github.com/glamboyosa/swig@v0.1.17-alpha
 Swig leverages PostgreSQL's powerful features to provide a robust job queue solution:
 
 - **Self-Hosted**: No external services required - just your existing PostgreSQL database
-- **Transactional Guarantees**: Jobs are processed exactly once with ACID compliance
-- **Built-in Queue Management**: Uses PostgreSQL's SKIP LOCK for efficient job distribution
-- **Leader Election**: Automatic leader election using PostgreSQL advisory locks
-- **Real-time Notifications**: Native LISTEN/NOTIFY support for immediate job processing
+- **Transactional Guarantees**: Enqueue jobs in the same transaction as your application data
+- **Built-in Queue Management**: Uses PostgreSQL's `SKIP LOCKED` for efficient job distribution
+- **Leader Election**: Automatic leader election using session-scoped PostgreSQL advisory locks
+- **Real-time Notifications**: Dedicated `LISTEN/NOTIFY` connections for immediate job processing
 - **Scalability**: Process jobs across multiple machines without external coordination
 
 ## Quick Start

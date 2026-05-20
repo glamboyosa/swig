@@ -1,6 +1,7 @@
 # Implementation details
 swig-implementation.md
 swig.md
+swig-interview-prep/
 # Binaries and build artifacts
 *.exe
 *.exe~

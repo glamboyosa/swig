@@ -18,6 +18,15 @@ type SQLDriver struct {
 	connStr string
 }
 
+type sqlListener struct {
+	listener *pq.Listener
+}
+
+type sqlAdvisoryLock struct {
+	conn   *sql.Conn
+	lockID int64
+}
+
 type sqlTxAdapter struct {
 	tx *sql.Tx
 }
@@ -53,6 +62,57 @@ func (tx *sqlTxAdapter) Query(ctx context.Context, sql string, args ...interface
 
 func (tx *sqlTxAdapter) QueryRow(ctx context.Context, sql string, args ...interface{}) Row {
 	return tx.tx.QueryRowContext(ctx, sql, args...)
+}
+
+func (l *sqlListener) WaitForNotification(ctx context.Context) (*Notification, error) {
+	select {
+	case notification := <-l.listener.Notify:
+		if notification == nil {
+			return nil, fmt.Errorf("received nil notification")
+		}
+		return &Notification{
+			Channel: notification.Channel,
+			Payload: notification.Extra,
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (l *sqlListener) Close(ctx context.Context) error {
+	_ = ctx
+	if err := l.listener.UnlistenAll(); err != nil {
+		l.listener.Close()
+		return err
+	}
+	return l.listener.Close()
+}
+
+func (l *sqlAdvisoryLock) Exec(ctx context.Context, sql string, args ...interface{}) error {
+	_, err := l.conn.ExecContext(ctx, sql, args...)
+	return err
+}
+
+func (l *sqlAdvisoryLock) Query(ctx context.Context, sql string, args ...interface{}) (Rows, error) {
+	rows, err := l.conn.QueryContext(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &sqlRowsAdapter{rows: rows}, nil
+}
+
+func (l *sqlAdvisoryLock) QueryRow(ctx context.Context, sql string, args ...interface{}) Row {
+	return l.conn.QueryRowContext(ctx, sql, args...)
+}
+
+func (l *sqlAdvisoryLock) Unlock(ctx context.Context) error {
+	_, err := l.conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, l.lockID)
+	return err
+}
+
+func (l *sqlAdvisoryLock) Close(ctx context.Context) error {
+	defer l.conn.Close()
+	return l.Unlock(ctx)
 }
 
 // NewSQLDriver creates a new database/sql driver implementation for PostgreSQL.
@@ -113,7 +173,7 @@ func (d *SQLDriver) QueryRow(ctx context.Context, sql string, args ...interface{
 }
 
 func (d *SQLDriver) Listen(ctx context.Context, channel string) error {
-	_, err := d.db.ExecContext(ctx, "LISTEN "+channel)
+	_, err := d.db.ExecContext(ctx, "LISTEN "+quoteIdentifier(channel))
 	return err
 }
 
@@ -155,6 +215,47 @@ func (d *SQLDriver) WaitForNotification(ctx context.Context) (*Notification, err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// NewListener creates and subscribes a long-lived lib/pq listener.
+func (d *SQLDriver) NewListener(ctx context.Context, channel string) (Listener, error) {
+	_ = ctx
+	listener := pq.NewListener(d.connStr,
+		10*time.Second,
+		time.Minute,
+		func(ev pq.ListenerEventType, err error) {
+			if err != nil {
+				log.Printf("Listener error: %v\n", err)
+			}
+		})
+
+	if err := listener.Listen(channel); err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("failed to listen on %s: %w", channel, err)
+	}
+
+	return &sqlListener{listener: listener}, nil
+}
+
+// TryAdvisoryLock acquires a session-scoped advisory lock on a dedicated
+// database/sql connection and returns that connection wrapped as the lock owner.
+func (d *SQLDriver) TryAdvisoryLock(ctx context.Context, lockID int64) (AdvisoryLock, bool, error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to acquire advisory lock connection: %w", err)
+	}
+
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, lockID).Scan(&acquired); err != nil {
+		conn.Close()
+		return nil, false, fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+	if !acquired {
+		conn.Close()
+		return nil, false, nil
+	}
+
+	return &sqlAdvisoryLock{conn: conn, lockID: lockID}, true, nil
 }
 
 // AddJobsWithTx adds multiple jobs as part of an existing transaction

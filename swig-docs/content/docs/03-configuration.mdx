@@ -73,6 +73,8 @@ workers.RegisterWorker(&ImageResizeWorker{})
 swigClient := swig.NewSwig(driver, configs, workers)
 ```
 
+The registry stores a factory for each worker type. Every claimed job gets a fresh worker instance before its JSON payload is unmarshaled, which avoids sharing mutable worker state across concurrent jobs.
+
 ## Job Options
 
 When adding jobs, you can specify various options:
@@ -238,12 +240,22 @@ Swig provides comprehensive error handling:
 - Maximum retry attempts can be configured
 - Error details are stored in the database for debugging
 
+## Connection Lifecycle
+
+Swig uses PostgreSQL features that are tied to a database session, so it keeps those responsibilities on dedicated connections:
+
+- Worker notifications use a long-lived `LISTEN/NOTIFY` listener per worker.
+- Leader election uses a dedicated advisory-lock connection for the active leader.
+- Shutdown cancels worker contexts, closes listeners, waits for workers, and releases the leader advisory lock from the same session that acquired it.
+
+Application queries and job inserts still use the normal driver pool. Dedicated connections are only used where PostgreSQL requires session ownership.
+
 ## Cleanup and Testing
 
 Swig provides methods for both graceful shutdown and complete cleanup:
 
 ```go
-// Graceful shutdown: Wait for jobs to complete
+// Graceful shutdown: cancel workers, wait for them, and release leader resources
 err := swigClient.Stop(ctx)
 
 // Complete cleanup: Drop all Swig tables
