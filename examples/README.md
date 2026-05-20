@@ -7,6 +7,14 @@ This directory contains example implementations of Swig using different PostgreS
 1. Docker installed and running
 2. Go 1.22 or later
 
+## Swig Version
+
+These examples are pinned to:
+
+```bash
+go get github.com/glamboyosa/swig@v0.1.24-alpha
+```
+
 ## Running Examples
 
 The examples use Docker to run PostgreSQL, so you don't need to install PostgreSQL locally. Use the Makefile to manage everything:
