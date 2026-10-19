@@ -58,7 +58,10 @@ jobs:
     - name: Get latest tag
       id: get_tag
       run: |
-        latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0-alpha")
+        # Use the highest version. git describe prefers annotated and nearest
+        # tags, so it can miss a newer lightweight tag on the same commit.
+        latest_tag=$(git tag -l 'v*-alpha' --sort=-v:refname | head -n 1)
+        latest_tag=${latest_tag:-v0.0.0-alpha}
         echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
 
     - name: Bump version
