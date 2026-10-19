@@ -22,10 +22,17 @@ const (
 	Default  QueueTypes = "default"
 	Priority QueueTypes = "priority"
 
-	leaderLockID  int64 = 1234567 // Arbitrary number for advisory lock
-	leaderKey           = "queue_leader"
-	leaderTTL           = 30 * time.Second
-	retryInterval       = 5 * time.Second
+	leaderLockID int64 = 1234567 // Arbitrary number for advisory lock
+	leaderKey          = "queue_leader"
+	leaderTTL          = 30 * time.Second
+)
+
+// Defaults for SwigOptions fields left at their zero value.
+const (
+	defaultJobLease       = time.Minute
+	defaultPollInterval   = 5 * time.Second
+	defaultLeaderInterval = 5 * time.Second
+	defaultRetryBackoff   = time.Second
 )
 
 // minimum number of workers to start
@@ -38,6 +45,42 @@ type SwigQueueConfig struct {
 	QueueType  QueueTypes
 	MaxWorkers int
 }
+
+// SwigOptions tunes Swig's timing. Zero values use the defaults.
+type SwigOptions struct {
+	// JobLease is how long a claimed job may go without a heartbeat before the
+	// leader assumes its worker died and requeues it. Running jobs renew their
+	// lease every JobLease/3. Default: 1 minute.
+	JobLease time.Duration
+	// PollInterval bounds how long an idle worker waits for a notification
+	// before checking for due jobs again. This picks up scheduled and retried
+	// jobs, which never send a notification. Default: 5 seconds.
+	PollInterval time.Duration
+	// LeaderInterval is how often an instance tries to become leader and how
+	// often the leader requeues jobs with expired leases. Default: 5 seconds.
+	LeaderInterval time.Duration
+	// RetryBackoff is the base retry delay. After failed attempt n, the job
+	// becomes due again after RetryBackoff * 2^n. Default: 1 second.
+	RetryBackoff time.Duration
+}
+
+// withDefaults returns a copy of o with zero values replaced by defaults.
+func (o SwigOptions) withDefaults() SwigOptions {
+	if o.JobLease <= 0 {
+		o.JobLease = defaultJobLease
+	}
+	if o.PollInterval <= 0 {
+		o.PollInterval = defaultPollInterval
+	}
+	if o.LeaderInterval <= 0 {
+		o.LeaderInterval = defaultLeaderInterval
+	}
+	if o.RetryBackoff <= 0 {
+		o.RetryBackoff = defaultRetryBackoff
+	}
+	return o
+}
+
 type Swig struct {
 	swigQueueConfig []SwigQueueConfig
 	driver          drivers.Driver
@@ -50,11 +93,13 @@ type Swig struct {
 	leaderLock      drivers.AdvisoryLock
 	leaderID        string // Current leader ID if we're the leader
 	workerID        string // Unique ID for this worker instance
+	options         SwigOptions
 }
 
 // NewSwig creates a new job queue instance with the specified database driver,
 // queue configurations, and worker registry. Each queue config defines a queue type (Default/Priority)
 // and its worker pool size. The worker registry must contain all worker types that will be processed.
+// An optional SwigOptions value tunes job leases, polling, and retry backoff.
 //
 // Example:
 //
@@ -70,8 +115,13 @@ type Swig struct {
 //	}
 //
 //	swig := NewSwig(driver, configs, workers)
-func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers workers.WorkerRegistry) *Swig {
+func NewSwig(driver drivers.Driver, swigQueueConfig []SwigQueueConfig, workers workers.WorkerRegistry, opts ...SwigOptions) *Swig {
+	options := SwigOptions{}
+	if len(opts) > 0 {
+		options = opts[0]
+	}
 	return &Swig{
+		options:         options.withDefaults(),
 		driver:          driver,
 		swigQueueConfig: swigQueueConfig,
 		Workers:         workers,
@@ -116,7 +166,7 @@ func (s *Swig) tryBecomeLeader(ctx context.Context) (drivers.AdvisoryLock, bool,
 }
 
 func (s *Swig) startLeaderElection(ctx context.Context) {
-	ticker := time.NewTicker(retryInterval)
+	ticker := time.NewTicker(s.options.LeaderInterval)
 	defer ticker.Stop()
 
 	for {
@@ -171,9 +221,10 @@ func (s *Swig) releaseLeader(ctx context.Context, lock drivers.AdvisoryLock) {
 	}
 }
 
-// performLeaderDuties handles leader responsibilities like retrying failed jobs
+// performLeaderDuties handles leader responsibilities like requeueing jobs
+// whose workers died.
 func (s *Swig) performLeaderDuties(ctx context.Context, lock drivers.AdvisoryLock) error {
-	ticker := time.NewTicker(retryInterval)
+	ticker := time.NewTicker(s.options.LeaderInterval)
 	defer ticker.Stop()
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -188,65 +239,55 @@ func (s *Swig) performLeaderDuties(ctx context.Context, lock drivers.AdvisoryLoc
 		case <-s.shutdown:
 			return nil
 		case <-ticker.C:
-			if err := s.retryFailedJobs(ctx, lock); err != nil {
+			if err := s.requeueExpiredJobs(ctx, lock); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-// retryFailedJobs finds failed jobs that can be retried and requeues them
-func (s *Swig) retryFailedJobs(ctx context.Context, tx drivers.Transaction) error {
-	// Find failed jobs that haven't exceeded max attempts and apply backoff
-	retrySQL := `
+// requeueExpiredJobs recovers jobs stuck in 'processing' because their worker
+// stopped renewing the lease, for example after a crash or SIGKILL. The claim
+// already counted the attempt, so jobs with attempts left become due again
+// immediately and exhausted jobs are marked failed.
+func (s *Swig) requeueExpiredJobs(ctx context.Context, tx drivers.Transaction) error {
+	requeueSQL := `
 		UPDATE swig_jobs
-		SET status = 'pending',
+		SET status = CASE
+				WHEN attempts >= max_attempts THEN 'failed'
+				ELSE 'pending'
+			END,
+			scheduled_for = NOW(),
+			last_error = 'job lease expired',
+			last_error_at = NOW(),
 			instance_id = NULL,
 			worker_id = NULL,
-			locked_at = NULL,
-			scheduled_for = CASE 
-				-- Apply exponential backoff: 2^attempts seconds
-				WHEN attempts > 0 THEN NOW() + (interval '1 second' * pow(2, attempts))
-				ELSE NOW()
-			END
-		WHERE status = 'failed'
-			AND attempts < max_attempts
-			AND (
-				instance_id IS NULL 
-				OR locked_at < NOW() - interval '5 minutes'
-			)
-			-- Only retry jobs that have waited their backoff period
-			AND (
-				last_error IS NULL 
-				OR last_error_at < NOW() - (interval '1 second' * pow(2, attempts))
-			)
-		RETURNING id, attempts`
+			locked_at = NULL
+		WHERE status = 'processing'
+			AND locked_at < NOW() - ($1::float8 * interval '1 millisecond')
+		RETURNING id`
 
-	var jobIDs []string
-	var totalAttempts int
-	rows, err := tx.Query(ctx, retrySQL)
+	rows, err := tx.Query(ctx, requeueSQL, s.options.JobLease.Milliseconds())
 	if err != nil {
 		// Don't report context cancellation as an error - this is normal during shutdown
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
 		}
-		return fmt.Errorf("failed to query failed jobs: %w", err)
+		return fmt.Errorf("failed to requeue expired jobs: %w", err)
 	}
 	defer rows.Close()
 
+	requeued := 0
 	for rows.Next() {
 		var id string
-		var attempts int
-		if err := rows.Scan(&id, &attempts); err != nil {
+		if err := rows.Scan(&id); err != nil {
 			return fmt.Errorf("failed to scan job ID: %w", err)
 		}
-		jobIDs = append(jobIDs, id)
-		totalAttempts += attempts
+		requeued++
 	}
 
-	if len(jobIDs) > 0 {
-		log.Printf("Requeued %d failed jobs for retry (avg attempts: %.1f)",
-			len(jobIDs), float64(totalAttempts)/float64(len(jobIDs)))
+	if requeued > 0 {
+		log.Printf("Recovered %d jobs with expired leases", requeued)
 	}
 
 	return nil
@@ -255,6 +296,10 @@ func (s *Swig) retryFailedJobs(ctx context.Context, tx drivers.Transaction) erro
 // Start initializes the Swig queue and creates the necessary tables
 func (s *Swig) Start(ctx context.Context) {
 	createTableSQL := `
+	-- This string runs as one implicit transaction, so the transaction-scoped
+	-- advisory lock serialises concurrent Starts across all of the DDL below.
+	SELECT pg_advisory_xact_lock(hashtext('swig_schema'));
+
 	CREATE TABLE IF NOT EXISTS swig_jobs (
 		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 		kind VARCHAR NOT NULL,
@@ -293,13 +338,40 @@ func (s *Swig) Start(ctx context.Context) {
 	END;
 	$$ LANGUAGE plpgsql;
 
-	CREATE TRIGGER swig_jobs_notify_trigger
-		AFTER INSERT ON swig_jobs
-		FOR EACH ROW
-		EXECUTE FUNCTION notify_job_created();`
+	-- Create indexes and the trigger only when missing, so a restart against an
+	-- existing schema takes no table locks.
+	DO $$
+	BEGIN
+		-- Supports the worker claim query
+		IF to_regclass('swig_jobs_pending_idx') IS NULL THEN
+			CREATE INDEX swig_jobs_pending_idx
+				ON swig_jobs (queue, scheduled_for)
+				WHERE status = 'pending';
+		END IF;
+		-- Supports the leader's expired lease scan
+		IF to_regclass('swig_jobs_processing_idx') IS NULL THEN
+			CREATE INDEX swig_jobs_processing_idx
+				ON swig_jobs (locked_at)
+				WHERE status = 'processing';
+		END IF;
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_trigger
+			WHERE tgname = 'swig_jobs_notify_trigger'
+				AND tgrelid = 'swig_jobs'::regclass
+		) THEN
+			CREATE TRIGGER swig_jobs_notify_trigger
+				AFTER INSERT ON swig_jobs
+				FOR EACH ROW
+				EXECUTE FUNCTION notify_job_created();
+		END IF;
+	END;
+	$$;`
 
 	createLeaderTableSQL := `
-	CREATE TABLE IF NOT EXISTS swig_leader (
+	SELECT pg_advisory_xact_lock(hashtext('swig_schema'));
+
+	-- Unlogged for better performance since this is temporary state
+	CREATE UNLOGGED TABLE IF NOT EXISTS swig_leader (
 		id TEXT PRIMARY KEY,          -- Usually 'queue_leader'
 		leader_id UUID NOT NULL,      -- Unique ID of current leader
 		expires_at TIMESTAMPTZ NOT NULL,
@@ -307,10 +379,7 @@ func (s *Swig) Start(ctx context.Context) {
 		
 		-- Ensure expires_at is always in the future
 		CONSTRAINT leader_expires_future CHECK (expires_at > NOW())
-	);
-	
-	-- Unlogged for better performance since this is temporary state
-	ALTER TABLE swig_leader SET UNLOGGED;`
+	);`
 
 	if err := s.driver.Exec(ctx, createTableSQL); err != nil {
 		log.Printf("Failed to create swig_jobs table: %v", err)
@@ -629,7 +698,8 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listene
 	workerID := pkg.GenerateWorkerID()
 
 	// Check for "no rows" errors from both database/sql and pgx
-	acquireAndProcessJob := func(ctx context.Context, queueType QueueTypes, specificJobID string) error {
+	// acquireAndProcessJob reports whether it claimed a job.
+	acquireAndProcessJob := func(ctx context.Context, queueType QueueTypes, specificJobID string) (bool, error) {
 		var acquireSQL string
 		var args []interface{}
 
@@ -692,27 +762,29 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listene
 
 		err := s.driver.QueryRow(ctx, acquireSQL, args...).Scan(&jobID, &kind, &payload)
 		if err == sql.ErrNoRows || err != nil && (err.Error() == "no rows in result set" || err.Error() == "no rows in result") {
-			return nil // No job available
+			return false, nil // No job available
 		}
 		if err != nil {
-			return fmt.Errorf("failed to acquire job: %w", err)
+			return false, fmt.Errorf("failed to acquire job: %w", err)
 		}
 
 		// Find the worker implementation
 		worker, ok := s.Workers.GetWorker(kind)
 		if !ok {
-			return fmt.Errorf("no worker registered for job type: %s", kind)
+			return true, fmt.Errorf("no worker registered for job type: %s", kind)
 		}
 
 		// Unmarshal the payload
 		if err := json.Unmarshal(payload, worker); err != nil {
-			return fmt.Errorf("failed to unmarshal job payload: %w", err)
+			return true, fmt.Errorf("failed to unmarshal job payload: %w", err)
 		}
 
-		// Process the job
+		stopHeartbeat := s.startHeartbeat(ctx, jobID, workerID)
 		err = worker.(interface{ Process(context.Context) error }).Process(ctx)
+		stopHeartbeat()
 
-		// Update job status based on processing result
+		// Update job status based on processing result. The worker_id check
+		// skips the update if the lease expired and the job was requeued.
 		if err != nil {
 			updateSQL := `
 				UPDATE swig_jobs
@@ -720,14 +792,15 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listene
 						WHEN attempts >= max_attempts THEN 'failed'
 						ELSE 'pending'
 					END,
-					last_error = $2,
+					scheduled_for = NOW() + ($4::float8 * pow(2, attempts) * interval '1 millisecond'),
+					last_error = $3,
 					last_error_at = NOW(),
 					instance_id = NULL,
 					worker_id = NULL,
 					locked_at = NULL
-				WHERE id = $1`
-			if err := s.driver.Exec(ctx, updateSQL, jobID, err.Error()); err != nil {
-				return fmt.Errorf("failed to update failed job: %w", err)
+				WHERE id = $1 AND worker_id = $2`
+			if err := s.driver.Exec(ctx, updateSQL, jobID, workerID, err.Error(), s.options.RetryBackoff.Milliseconds()); err != nil {
+				return true, fmt.Errorf("failed to update failed job: %w", err)
 			}
 		} else {
 			updateSQL := `
@@ -736,23 +809,27 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listene
 					instance_id = NULL,
 					worker_id = NULL,
 					locked_at = NULL
-				WHERE id = $1`
-			if err := s.driver.Exec(ctx, updateSQL, jobID); err != nil {
-				return fmt.Errorf("failed to update completed job: %w", err)
+				WHERE id = $1 AND worker_id = $2`
+			if err := s.driver.Exec(ctx, updateSQL, jobID, workerID); err != nil {
+				return true, fmt.Errorf("failed to update completed job: %w", err)
 			}
 		}
 
-		return nil
+		return true, nil
 	}
 
-	// First try to acquire and process any job
-	err := acquireAndProcessJob(ctx, queueType, "")
-	if err != nil {
+	// First try to acquire and process any job. After a job, look for the next
+	// one right away: backlogged and retried jobs send no notification.
+	claimed, err := acquireAndProcessJob(ctx, queueType, "")
+	if err != nil || claimed {
 		return err
 	}
 
-	// If no job was available, wait for notification
-	notification, err := listener.WaitForNotification(ctx)
+	// If no job was available, wait for a notification. The wait is bounded
+	// because scheduled and retried jobs become due without a notification.
+	waitCtx, cancel := context.WithTimeout(ctx, s.options.PollInterval)
+	defer cancel()
+	notification, err := listener.WaitForNotification(waitCtx)
 	if err != nil {
 		// Don't report context cancellation as an error - this is normal during shutdown
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -769,11 +846,45 @@ func (s *Swig) processNextJob(ctx context.Context, queueType QueueTypes, listene
 		}
 		if err := json.Unmarshal([]byte(notification.Payload), &notificationData); err == nil && notificationData.ID != "" {
 			// Try to acquire and process the specific job from the notification
-			return acquireAndProcessJob(ctx, queueType, notificationData.ID)
+			_, err := acquireAndProcessJob(ctx, queueType, notificationData.ID)
+			return err
 		}
 	}
 
 	return nil
+}
+
+// startHeartbeat renews the job's lease while it runs so the leader does not
+// requeue long jobs. The returned function stops the heartbeat and waits for it.
+func (s *Swig) startHeartbeat(ctx context.Context, jobID, workerID string) func() {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(s.options.JobLease / 3)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				heartbeatSQL := `
+					UPDATE swig_jobs
+					SET locked_at = NOW()
+					WHERE id = $1 AND worker_id = $2 AND status = 'processing'`
+				if err := s.driver.Exec(heartbeatCtx, heartbeatSQL, jobID, workerID); err != nil && heartbeatCtx.Err() == nil {
+					log.Printf("Failed to renew lease for job %s: %v", jobID, err)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // Close drops all Swig-related tables from the database. This is a destructive operation

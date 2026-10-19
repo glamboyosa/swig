@@ -65,13 +65,13 @@ Choose the approach that best fits your needs:
 
 Benefits of transactional job enqueueing:
 - **No Lost Jobs**: Jobs are either fully committed or not at all
-- **Atomic Processing**: Jobs are processed exactly once using PostgreSQL's SKIP LOCK
+- **Atomic Claiming**: Each job is claimed by one worker at a time using PostgreSQL's SKIP LOCKED
 - **Data Consistency**: Jobs can be part of your application's transactions
 
 ## Features
 
 - **PostgreSQL-Powered**: Leverages PostgreSQL's SKIP LOCK for efficient job distribution
-- **Transactional Integrity**: Jobs are processed exactly once with transactional guarantees
+- **Transactional Integrity**: Jobs are enqueued atomically with your data and delivered at least once
 - **Leader Election**: Built-in leader election using advisory locks
 - **Multiple Queue Support**: Priority and default queues out of the box
 - **Type-Safe Job Arguments**: Strongly typed job arguments with Go generics
@@ -249,11 +249,44 @@ The registry ensures that:
 ## Job Processing
 
 Swig handles job processing with:
-- Automatic retries
+- Automatic retries with exponential backoff
 - Error tracking
 - Job status management
 - Scheduled jobs
 - Priority queues
+- Recovery of jobs whose worker crashed
+
+### Delivery guarantees
+
+Swig delivers jobs **at least once**. A job can run more than once, for example
+when a worker crashes after finishing the work but before marking the job
+completed. Make `Process` idempotent.
+
+- **Retries**: when `Process` returns an error, the job is retried after
+  `RetryBackoff * 2^attempts` until it reaches its maximum attempts (3), then it
+  is marked `failed`.
+- **Leases**: a running job renews its lease every `JobLease / 3`. If a worker
+  dies (SIGKILL, OOM, lost connection), the leader requeues its jobs once the
+  lease expires, or marks them `failed` if no attempts are left.
+- **Polling**: idle workers wake on `LISTEN/NOTIFY` for new jobs and also check
+  for due jobs every `PollInterval`, so scheduled and retried jobs run without a
+  new insert.
+- **Connections**: with pgx, each worker (at least 3 per queue) holds one pool
+  connection for `LISTEN`, and the leader holds one more. Size the pool above
+  that total, with headroom for running jobs, or lease renewals can wait for a
+  connection, the lease can expire, and a running job can be picked up a second
+  time.
+
+All timings are optional:
+
+```go
+swigClient := swig.NewSwig(driver, configs, workers, swig.SwigOptions{
+    JobLease:       time.Minute,     // default 1 minute
+    PollInterval:   5 * time.Second, // default 5 seconds
+    LeaderInterval: 5 * time.Second, // default 5 seconds
+    RetryBackoff:   time.Second,     // default 1 second
+})
+```
 
 ## Cleanup and Testing
 
@@ -287,7 +320,7 @@ func TestJobProcessing(t *testing.T) {
 
 Swig uses PostgreSQL's SKIP LOCK for efficient job distribution across multiple processes. This, combined with advisory locks for leader election, ensures:
 
-- No duplicate job processing
+- No two workers hold the same job at once
 - Fair job distribution
 - High availability
 - Transactional integrity

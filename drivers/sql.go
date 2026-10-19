@@ -79,13 +79,23 @@ func (l *sqlListener) WaitForNotification(ctx context.Context) (*Notification, e
 	}
 }
 
+// Close closes the listener connection, which also ends its LISTEN. It does not
+// call UnlistenAll: that blocks forever once undelivered notifications fill the
+// Notify channel, which happens after a burst of inserts.
 func (l *sqlListener) Close(ctx context.Context) error {
-	_ = ctx
-	if err := l.listener.UnlistenAll(); err != nil {
-		l.listener.Close()
-		return err
+	err := l.listener.Close()
+
+	// Drain pending notifications so lib/pq's delivery goroutine can exit.
+	for {
+		select {
+		case _, ok := <-l.listener.Notify:
+			if !ok {
+				return err
+			}
+		case <-ctx.Done():
+			return err
+		}
 	}
-	return l.listener.Close()
 }
 
 func (l *sqlAdvisoryLock) Exec(ctx context.Context, sql string, args ...interface{}) error {

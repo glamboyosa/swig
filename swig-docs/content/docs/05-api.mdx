@@ -61,8 +61,10 @@ type BatchJob struct {
 Creates a new Swig instance.
 
 ```go
-func NewSwig(driver Driver, configs []SwigQueueConfig, workers WorkerRegistry) *Swig
+func NewSwig(driver Driver, configs []SwigQueueConfig, workers WorkerRegistry, opts ...SwigOptions) *Swig
 ```
+
+`SwigOptions` optionally sets `JobLease`, `PollInterval`, `LeaderInterval`, and `RetryBackoff`. Zero values use the defaults.
 
 ### Start
 

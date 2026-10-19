@@ -75,7 +75,7 @@ Workers are registered once by job name, but Swig creates a fresh worker instanc
 ### SKIP LOCKED for Job Distribution
 
 Swig uses PostgreSQL's `FOR UPDATE SKIP LOCKED` feature to ensure:
-- No duplicate job processing
+- No two workers hold the same job at once (delivery is at least once)
 - Fair job distribution across workers
 - High availability
 - Transactional integrity
